@@ -361,6 +361,17 @@ function agentInstallScript(agent) {
 set -euo pipefail
 install_dir=${JSON.stringify(installDir)}
 service_file=${JSON.stringify(serviceFile)}
+install_node() {
+  if command -v node >/dev/null 2>&1 && [ "$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)" -ge 18 ]; then return; fi
+  echo "正在安装 Node.js 20 LTS..."
+  if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y ca-certificates curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y ca-certificates curl && curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - && dnf install -y nodejs
+  elif command -v yum >/dev/null 2>&1; then yum install -y ca-certificates curl && curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - && yum install -y nodejs
+  elif command -v apk >/dev/null 2>&1; then apk add --no-cache nodejs npm
+  else echo "未找到受支持的软件包管理器，请先安装 Node.js 18 或更高版本。"; exit 1; fi
+}
+install_node
+if ! command -v curl >/dev/null 2>&1; then echo "缺少 curl，无法下载 Agent 脚本。"; exit 1; fi
 mkdir -p "$install_dir"
 curl -fsSL ${JSON.stringify(`${agent.controllerUrl}/agent.js`)} -o "$install_dir/agent.js"
 cat > "$service_file" <<'UNIT'
@@ -393,7 +404,7 @@ function createAgent(data) {
   const now = new Date().toISOString(); return { id: `agent-${token(9)}`, token: token(32), name, controllerUrl: target, enabled: true, version: '', hostname: '', platform: '', arch: '', nodeVersion: '', lastSeenAt: '', createdAt: now, updatedAt: now };
 }
 function agentInboundTasks(agentId) {
-  return readStore(inboundFile, seedInbounds, normalizeInbound).filter(inbound => inbound.agentId === agentId && inbound.status === 'running').map(inbound => ({ id: inbound.id, name: inbound.name, port: inbound.port, xray: inbound.xray }));
+  return readStore(inboundFile, seedInbounds, normalizeInbound).filter(inbound => inbound.agentId === agentId && inbound.status === 'running' && !inboundTlsError(inbound)).map(inbound => ({ id: inbound.id, name: inbound.name, port: inbound.port, xray: inbound.xray }));
 }function agentRelayTasks(agentId) {
   return readStore(relayFile, seedRelays, normalizeRelay).filter(rule => rule.agentId === agentId && rule.status === 'running').map(rule => ({ id: rule.id, name: rule.name, transport: rule.transport, listenPort: rule.listenPort, bindAddress: rule.bindAddress, targetHost: rule.targetHost, targetPort: rule.targetPort }));
 }
@@ -440,6 +451,7 @@ function inboundSnapshot(inbound) {
     if (!info.running) return { ...inbound, status: 'error', desiredStatus: inbound.status, lastError: info.lastError || 'Xray Core 尚未启动' };
     return { ...inbound, lastError: '' };
   }
+  const tlsError = inboundTlsError(inbound); if (tlsError) return { ...inbound, status: 'error', desiredStatus: inbound.status, lastError: tlsError };
   const agent = readAgents().find(item => item.id === inbound.agentId); const reported = agent?.inboundStates?.find(item => item.id === inbound.id); const state = inbound.status !== 'running' ? 'stopped' : !agent ? 'error' : agentStatus(agent) === 'online' ? (reported?.status || 'starting') : agentStatus(agent);
   return { ...inbound, status: state, desiredStatus: inbound.status, lastError: state === 'error' ? (reported?.lastError || (agent?.xrayAvailable === false ? 'Agent 未检测到 Xray Core' : '远程节点启动失败')) : (reported?.lastError || ''), agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
 }function tcpReachable(host, port, timeout = 3500) {
@@ -510,7 +522,7 @@ function createUdpRelay(rule, runtime) {
 }
 async function startRelay(rule) {
   if (!Number.isInteger(rule.listenPort) || !validText(rule.targetHost) || !Number.isInteger(rule.targetPort)) throw new Error('请填写有效监听端口、目标地址和目标端口');
-  if (readStore(inboundFile, seedInbounds, normalizeInbound).some(inbound => inbound.status === 'running' && inbound.port === rule.listenPort)) throw new Error('监听端口与已启用入站冲突');
+  if (readStore(inboundFile, seedInbounds, normalizeInbound).some(inbound => !inbound.agentId && inbound.status === 'running' && inbound.port === rule.listenPort)) throw new Error('监听端口与本机已启用入站冲突');
   if (relayRuntimes.has(rule.id)) return relaySnapshot(rule);
   const runtime = { status: 'starting', servers: [], udpClients: new Map(), bytesIn: 0, bytesOut: 0, connections: 0, lastError: '' }; relayRuntimes.set(rule.id, runtime);
   try { if (rule.transport === 'tcp' || rule.transport === 'tcp+udp') await createTcpRelay(rule, runtime); if (rule.transport === 'udp' || rule.transport === 'tcp+udp') await createUdpRelay(rule, runtime); runtime.status = 'running'; return relaySnapshot(rule); }
@@ -579,14 +591,14 @@ async function handleRelays(req, res, parts) {
   if (parts.length === 2 && req.method === 'GET') return json(res, 200, readStore(inboundFile, seedInbounds, normalizeInbound).map(inboundSnapshot));
   if (parts.length === 3 && parts[2] === 'import-3xui' && req.method === 'POST') {
     let inbound; try { inbound = import3xuiInbound(await body(req)); } catch (error) { return json(res, 400, { error: error.message }); }
-    const agents = readAgents(); if (inbound.agentId && !agents.some(agent => agent.id === inbound.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const tlsError = inboundTlsError(inbound); if (tlsError) return json(res, 400, { error: tlsError });
+    const agents = readAgents(); if (inbound.agentId && !agents.some(agent => agent.id === inbound.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const tlsError = inboundTlsError(inbound); if (inbound.status === 'running' && tlsError) return json(res, 400, { error: tlsError });
     const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const scope = item => (item.agentId || '') === inbound.agentId;
     if (inbounds.some(item => scope(item) && item.port === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' });
     const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === inbound.agentId && relay.listenPort === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
     inbounds.unshift(inbound); writeStore(inboundFile, inbounds); if (!inbound.agentId && inbound.status === 'running') await ensureLocalRuntime(); return json(res, 201, inboundSnapshot(inbound));
   }
   if (parts.length === 2 && req.method === 'POST') {
-    const inbound = buildNode(await body(req)); if (!inbound) return json(res, 400, { error: '节点名称、地址和端口必须有效' }); const agents = readAgents(); if (inbound.agentId && !agents.some(agent => agent.id === inbound.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const tlsError = inboundTlsError(inbound); if (tlsError) return json(res, 400, { error: tlsError });
+    const inbound = buildNode(await body(req)); if (!inbound) return json(res, 400, { error: '节点名称、地址和端口必须有效' }); const agents = readAgents(); if (inbound.agentId && !agents.some(agent => agent.id === inbound.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const tlsError = inboundTlsError(inbound); if (inbound.status === 'running' && tlsError) return json(res, 400, { error: tlsError });
     const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const scope = item => (item.agentId || '') === inbound.agentId; if (inbounds.some(item => scope(item) && item.port === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === inbound.agentId && relay.listenPort === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
     inbounds.unshift(inbound); writeStore(inboundFile, inbounds); if (!inbound.agentId) await ensureLocalRuntime(); return json(res, 201, inboundSnapshot(inbound));
   }
@@ -594,7 +606,7 @@ async function handleRelays(req, res, parts) {
   if (req.method === 'PATCH') {
     const data = await body(req); const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const index = inbounds.findIndex(item => item.id === inboundId); if (index < 0) return json(res, 404, { error: 'Not found' }); const inbound = inbounds[index];
     if (Object.prototype.hasOwnProperty.call(data, 'status') && Object.keys(data).length === 1) { if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' }); const tlsError = data.status === 'running' ? inboundTlsError(inbound) : ''; if (tlsError) return json(res, 400, { error: tlsError }); inbound.status = data.status; writeStore(inboundFile, inbounds); if (!inbound.agentId) { if (inbound.status === 'running') await ensureLocalRuntime(); else await syncRuntimeIfRunning(); } return json(res, 200, inboundSnapshot(inbound)); }
-    let updated; try { updated = updateInbound(inbound, data); } catch (error) { return json(res, 400, { error: error.message }); } if (!updated) return json(res, 400, { error: '节点名称、地址和端口必须有效' }); const tlsError = inboundTlsError(updated); if (tlsError) return json(res, 400, { error: tlsError });
+    let updated; try { updated = updateInbound(inbound, data); } catch (error) { return json(res, 400, { error: error.message }); } if (!updated) return json(res, 400, { error: '节点名称、地址和端口必须有效' }); const tlsError = inboundTlsError(updated); if (updated.status === 'running' && tlsError) return json(res, 400, { error: tlsError });
     const agents = readAgents(); if (updated.agentId && !agents.some(agent => agent.id === updated.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' });
     if (inbounds.some(item => item.id !== inboundId && (item.agentId || '') === updated.agentId && item.port === updated.port)) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' });
     const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === updated.agentId && relay.listenPort === updated.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
@@ -613,7 +625,7 @@ async function handleRelays(req, res, parts) {
     if (inboundId) {
       const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const inbound = inbounds.find(item => item.id === inboundId);
       if (!inbound) return json(res, 404, { error: '选定的入站不存在' });
-      const access = userAccessForInbound(inbound, user); if (!access) return json(res, 400, { error: '该入站协议暂不支持用户分配' });
+      if (inbound.status !== 'running') return json(res, 400, { error: '\u9009\u5b9a\u7684\u5165\u7ad9\u5df2\u6682\u505c\uff0c\u4e0d\u80fd\u5206\u914d\u7528\u6237' }); const tlsError = inboundTlsError(inbound); if (tlsError) return json(res, 400, { error: tlsError }); const access = userAccessForInbound(inbound, user); if (!access) return json(res, 400, { error: '该入站协议暂不支持用户分配' });
       user.access = [access]; setAccessActive(inbound, access, true); writeStore(inboundFile, inbounds); if (!inbound.agentId && inbound.status === 'running') await ensureLocalRuntime(); else await syncRuntimeIfRunning();
     }
     users.unshift(user); writeStore(userFile, users); return json(res, 201, user);
@@ -867,7 +879,7 @@ if (require.main === module) {
     https.createServer({ cert: fs.readFileSync(bootTls.certPath), key: fs.readFileSync(bootTls.keyPath) }, requestHandler).listen(httpsPort, panelHost, () => console.log(`3xUI Lite HTTPS: https://${panelHost}:${httpsPort}`));
   }
 }
-module.exports = { server, buildNode, import3xuiInbound, createUser, normalizeExpire, userExpired, inboundTlsError, readSettings };
+module.exports = { server, buildNode, import3xuiInbound, createUser, normalizeExpire, userExpired, inboundTlsError, agentInstallScript, readSettings };
 
 
 

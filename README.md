@@ -51,7 +51,7 @@ sudo bash ./deploy-linux.sh
 
 ## Agent 运行要求
 
-Agent 通过 systemd 服务部署。它可以接收面板下发的 Xray 安装、节点配置及中转规则。Agent 端自动安装 Xray 当前支持 Linux x64、arm64 和 arm 架构。面板本机也支持从系统页面安装官方 Xray Core；版本可填写 `v26.3.27`、`26.3.27`，或留空安装最新版。
+Agent 通过 systemd 服务部署。它可以接收面板下发的 Xray 安装、节点配置及中转规则。部署引导会自动检查并安装 Node.js 20 LTS，因此纯净的常见 Linux VPS 也可直接执行部署命令。Agent 端自动安装 Xray 当前支持 Linux x64、arm64 和 arm 架构。面板本机也支持从系统页面安装官方 Xray Core；版本可填写 `v26.3.27`、`26.3.27`，或留空安装最新版。
 
 ## 安全建议
 
@@ -83,4 +83,4 @@ Agent 如在 Xray 安装过程中异常中断，重启后会自动解除残留�
 
 ## TLS 节点保护
 
-TLS、WebSocket、gRPC 和 Trojan 模板不会再在缺少证书时写入会使 Xray 失败的配置。本机节点使用系统设置中已保存的证书；远程 Agent 节点必须填写该 Agent 机器上的证书和私钥路径。已有的无证书 TLS 节点会在面板中明确标为异常，并自动排除在本机 Core 配置之外，不会再拖垮其他可用节点。
+TLS、WebSocket、gRPC 和 Trojan 模板不会再在缺少证书时写入会使 Xray 失败的配置。本机节点使用系统设置中已保存的证书；远程 Agent 节点必须填写该 Agent 机器上的证书和私钥路径。已有的无证书 TLS 节点会在面板中明确标为异常，并自动排除在本机 Core 配置之外，不会再拖垮其他可用节点；同样的无效节点不会下发到远程 Agent。
