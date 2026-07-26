@@ -80,9 +80,14 @@ WorkingDirectory=${APP_DIR}
 Environment=NODE_ENV=production
 Environment=PORT=${PORT:-3000}
 Environment=PANEL_HOST=${PANEL_HOST:-0.0.0.0}
+Environment=SECURE_COOKIE=${SECURE_COOKIE:-false}
 ExecStart=${NODE_BIN} ${APP_DIR}/server.js
 Restart=on-failure
 RestartSec=5
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
 NoNewPrivileges=true
 
 [Install]

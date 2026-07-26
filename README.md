@@ -84,3 +84,10 @@ Agent 如在 Xray 安装过程中异常中断，重启后会自动解除残留�
 ## TLS 节点保护
 
 TLS、WebSocket、gRPC 和 Trojan 模板不会再在缺少证书时写入会使 Xray 失败的配置。本机节点使用系统设置中已保存的证书；远程 Agent 节点必须填写该 Agent 机器上的证书和私钥路径。已有的无证书 TLS 节点会在面板中明确标为异常，并自动排除在本机 Core 配置之外，不会再拖垮其他可用节点；同样的无效节点不会下发到远程 Agent。
+## 商用部署基线
+
+- 不要直接把 HTTP 面板暴露到公网；使用 Nginx、Caddy 或负载均衡器提供 HTTPS，并将面板端口限制为反向代理或管理网段可访问。
+- HTTPS 反向代理场景可用 `SECURE_COOKIE=true` 部署，使管理员会话 Cookie 仅通过 HTTPS 发送：`curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/main/install.sh | sudo SECURE_COOKIE=true bash`。
+- 首次登录必须修改默认管理员密码，未完成前后端会拒绝所有管理操作。
+- 面板数据采用私有文件权限和原子写入；仍应对 `/opt/3xui-lite-agent-panel` 中的运行数据定期离机备份，并在升级前创建快照。
+- 建议仅放行面板 HTTPS、已启用节点端口和必要的 Agent 回连路径；Agent 令牌、管理员 Cookie 与节点 JSON 都应视为敏感凭据。

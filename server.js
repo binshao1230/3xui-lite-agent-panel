@@ -33,6 +33,7 @@ const protocols = new Set(Object.keys(protocolMap));
 const statuses = new Set(['running', 'stopped']);
 const ss2022Methods = new Set(['2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305']);
 const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8' };
+const securityHeaders = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Content-Security-Policy': "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" };
 const seedUsers = [];
 
 function token(bytes = 16) { return crypto.randomBytes(bytes).toString('base64url'); }
@@ -50,14 +51,19 @@ function readSettings() {
   writeSettings(settings);
   return settings;
 }
-function writeSettings(settings) { fs.writeFileSync(settingFile, JSON.stringify(settings, null, 2)); }
+function writePrivateFile(file, contents) {
+  const temp = `${file}.${process.pid}.${token(6)}.tmp`;
+  try { fs.writeFileSync(temp, contents, { mode: 0o600 }); fs.renameSync(temp, file); fs.chmodSync(file, 0o600); }
+  finally { try { if (fs.existsSync(temp)) fs.unlinkSync(temp); } catch {} }
+}
+function writeSettings(settings) { writePrivateFile(settingFile, JSON.stringify(settings, null, 2)); }
 function readStore(file, fallback, normalizer) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
     return Array.isArray(data) ? (normalizer ? data.map(normalizer) : data) : fallback.map(item => ({ ...item }));
   } catch { return fallback.map(item => ({ ...item })); }
 }
-function writeStore(file, items) { fs.writeFileSync(file, JSON.stringify(items, null, 2)); }
+function writeStore(file, items) { writePrivateFile(file, JSON.stringify(items, null, 2)); }
 function removeLegacyDemoData() {
   const remove = (file, predicate) => {
     try {
@@ -95,7 +101,7 @@ function migrateInboundCompatibility() {
 }
 migrateInboundCompatibility();
 function json(res, code, payload, headers = {}) {
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
+  res.writeHead(code, { ...securityHeaders, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(code === 204 ? '' : JSON.stringify(payload));
 }
 function body(req) {
@@ -387,6 +393,9 @@ ExecStart=/usr/bin/env node ${installDir}/agent.js --controller ${agent.controll
 Restart=always
 RestartSec=5
 RestartPreventExitStatus=1
+UMask=0077
+PrivateTmp=true
+ProtectHome=true
 NoNewPrivileges=true
 
 [Install]
@@ -582,7 +591,7 @@ async function handleRelays(req, res, parts) {
   const inboundId = Number(parts[2]);
   if (parts.length === 4 && parts[3] === 'qr' && req.method === 'GET' && Number.isInteger(inboundId)) {
     const inbound = readStore(inboundFile, seedInbounds, normalizeInbound).find(item => item.id === inboundId); if (!inbound) return json(res, 404, { error: 'Not found' });
-    const svg = await QRCode.toString(inbound.shareLink, { type: 'svg', errorCorrectionLevel: 'M', margin: 1, width: 280, color: { dark: '#202030', light: '#ffffffff' } }); res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(svg);
+    const svg = await QRCode.toString(inbound.shareLink, { type: 'svg', errorCorrectionLevel: 'M', margin: 1, width: 280, color: { dark: '#202030', light: '#ffffffff' } }); res.writeHead(200, { ...securityHeaders, 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(svg);
   }
   if (parts.length === 4 && parts[3] === 'diagnose' && req.method === 'POST' && Number.isInteger(inboundId)) {
     const inbound = readStore(inboundFile, seedInbounds, normalizeInbound).find(item => item.id === inboundId); if (!inbound) return json(res, 404, { error: 'Not found' });
@@ -847,6 +856,7 @@ async function requestHandler(req, res) {
     if (parts[0] === 'api' && parts[1] === 'agent') { await reconcileExpiredUsers(); return handleAgentGateway(req, res, parts); }
     if (parts[0] === 'api') {
       if (!requireAuth(req, res)) return;
+      if (readSettings().admin.mustChangePassword && !(parts[1] === 'system' && url.pathname === '/api/system/password')) return json(res, 403, { error: '首次登录必须先修改默认管理员密码' });
       await reconcileExpiredUsers();
       if (parts[1] === 'relays') return handleRelays(req, res, parts);
       if (parts[1] === 'agents') return handleAgents(req, res, parts);
@@ -860,7 +870,7 @@ async function requestHandler(req, res) {
     if (req.method !== 'GET') return json(res, 405, { error: 'Method not allowed' });
     const requested = url.pathname === '/' ? 'index.html' : url.pathname.slice(1); const file = path.resolve(root, requested);
     if (!file.startsWith(root + path.sep) || (privateFiles.has(requested) || requested.startsWith('runtime/') || requested.startsWith('.xray-install-')) || !fs.existsSync(file)) return json(res, 404, { error: 'Not found' });
-    res.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream' }); fs.createReadStream(file).pipe(res);
+    res.writeHead(200, { ...securityHeaders, 'Content-Type': types[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); fs.createReadStream(file).pipe(res);
   } catch (error) { json(res, 500, { error: error.message || 'Server error' }); }
 }
 const server = http.createServer(requestHandler);
@@ -872,6 +882,7 @@ if (require.main === module) {
     if (runtimeConfig().inbounds.length) { const started = startRuntime(); if (started.error) { runtime.lastError = started.error; console.error(`Xray startup failed: ${started.error}`); } }
     reconcileExpiredUsers().catch(error => console.error(`User expiration reconciliation failed: ${error.message}`));
     setInterval(() => reconcileExpiredUsers().catch(error => console.error(`User expiration reconciliation failed: ${error.message}`)), 60 * 1000).unref();
+    setInterval(() => { const now = Date.now(); for (const [value, session] of sessions) if (session.expiresAt <= now) sessions.delete(value); }, 15 * 60 * 1000).unref();
   });
   const bootTls = readSettings().tls;
   if (bootTls.certPath && bootTls.keyPath && fs.existsSync(bootTls.certPath) && fs.existsSync(bootTls.keyPath)) {
