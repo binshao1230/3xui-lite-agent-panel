@@ -1,0 +1,14 @@
+node_modules/
+runtime/
+settings.json
+users.json
+inbounds.json
+relays.json
+agents.json
+traffic.json
+runtime-xray.json
+agent-xray-config.json
+.3xui-lite-agent-state.json
+agent-xray-config.json.next
+*.log
+.env
