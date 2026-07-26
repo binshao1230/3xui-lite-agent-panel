@@ -59,3 +59,8 @@ Agent 通过 systemd 服务部署。它可以接收面板下发的 Xray 安装�
 - 对外暴露前请通过反向代理或证书配置 HTTPS。
 - 防火墙仅放行面板端口，以及实际启用的节点或中转端口。
 - 运行时数据、节点配置和 Agent 令牌均不会被提交到仓库或包含在发布源码中。
+## 3x-ui 入站配置兼容
+
+入站页面提供“导入 3x-ui 配置”入口，可粘贴 3x-ui 导出的单个入站 JSON。支持 VLESS（含 Reality、TCP、TLS、WebSocket、gRPC）、Trojan 与 Shadowsocks；导入时会保留原始 UUID、用户密码、Reality 私钥、shortId、传输层和 TLS 参数。
+
+面板启动时还会对已有入站进行非破坏性兼容迁移，补齐 Xray/3x-ui 使用的 `fallbacks`、`tcpSettings`、Reality 版本字段和 sniffing 字段，不会改写端口、UUID、密钥或用户数据。每次本机 Core 启动/重载前，都会先执行 Xray 配置校验；不通过时在系统页显示具体错误，避免写入无效配置。

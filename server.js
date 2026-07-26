@@ -73,6 +73,27 @@ function removeLegacyDemoData() {
   remove(trafficFile, item => [201, 202].includes(Number(item?.userId)));
 }
 removeLegacyDemoData();
+function alignInboundWith3xui(inbound) {
+  if (!inbound || typeof inbound !== 'object') return false;
+  let changed = false; const settings = inbound.settings || {}; const stream = inbound.streamSettings || {}; const sniffing = inbound.sniffing || {};
+  if (inbound.protocolCode === 'vless' && !Array.isArray(settings.fallbacks)) { settings.fallbacks = []; changed = true; }
+  if (stream.network === 'tcp' && !stream.tcpSettings) { stream.tcpSettings = { header: { type: 'none' } }; changed = true; }
+  if (stream.security === 'reality' && stream.realitySettings) {
+    const reality = stream.realitySettings;
+    if (reality.minClientVer === undefined) { reality.minClientVer = ''; changed = true; }
+    if (reality.maxClientVer === undefined) { reality.maxClientVer = ''; changed = true; }
+    if (reality.maxTimeDiff === undefined) { reality.maxTimeDiff = 0; changed = true; }
+    if (!reality.settings) { reality.settings = {}; changed = true; }
+    if (reality.settings.spiderX === undefined) { reality.settings.spiderX = '/'; changed = true; }
+  }
+  if (sniffing.routeOnly === undefined) { sniffing.routeOnly = false; changed = true; }
+  if (changed) { inbound.settings = settings; inbound.streamSettings = stream; inbound.sniffing = sniffing; inbound.xray = { ...(inbound.xray || {}), settings, streamSettings: stream, sniffing }; }
+  return changed;
+}
+function migrateInboundCompatibility() {
+  try { const items = JSON.parse(fs.readFileSync(inboundFile, 'utf8')); if (!Array.isArray(items)) return; if (items.some(alignInboundWith3xui)) writeStore(inboundFile, items); } catch {}
+}
+migrateInboundCompatibility();
 function json(res, code, payload, headers = {}) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(code === 204 ? '' : JSON.stringify(payload));
@@ -123,39 +144,39 @@ function makeVlessReality(input, nodeId, status) {
   const clientId = crypto.randomUUID(); const keys = x25519Pair(); const sid = shortId();
   const sni = cleanText(input.sni, 'www.microsoft.com'); const dest = cleanText(input.dest, `${sni}:443`);
   const fingerprint = cleanText(input.fingerprint, 'chrome'); const flow = cleanText(input.flow, 'xtls-rprx-vision'); const email = cleanText(input.email, `client-${nodeId}`);
-  const settings = { clients: [{ id: clientId, email, flow }], decryption: 'none' };
-  const streamSettings = { network: 'tcp', security: 'reality', realitySettings: { show: false, dest, xver: 0, serverNames: [sni], privateKey: keys.privateKey, shortIds: [sid], settings: { publicKey: keys.publicKey, fingerprint, serverName: sni, spiderX: '/' } } };
+  const settings = { clients: [{ id: clientId, email, flow }], decryption: 'none', fallbacks: [] };
+  const streamSettings = { network: 'tcp', security: 'reality', tcpSettings: { header: { type: 'none' } }, realitySettings: { show: false, dest, xver: 0, serverNames: [sni], privateKey: keys.privateKey, minClientVer: '', maxClientVer: '', maxTimeDiff: 0, shortIds: [sid], settings: { publicKey: keys.publicKey, fingerprint, serverName: '', spiderX: '/' } } };
   const shareLink = `vless://${clientId}@${input.serverAddress}:${input.port}?type=tcp&encryption=none&security=reality&pbk=${keys.publicKey}&fp=${fingerprint}&sni=${encodeURIComponent(sni)}&sid=${sid}&spx=%2F&flow=${flow}#${shareName(input.name)}`;
   return finishInbound(input, nodeId, status, 'vless', 'Reality', settings, streamSettings, shareLink);
 }
 function makeVless(input, nodeId, status) {
   const clientId = crypto.randomUUID(); const email = cleanText(input.email, `client-${nodeId}`);
-  const settings = { clients: [{ id: clientId, email }], decryption: 'none' };
-  const streamSettings = { network: 'tcp', security: 'none' };
+  const settings = { clients: [{ id: clientId, email }], decryption: 'none', fallbacks: [] };
+  const streamSettings = { network: 'tcp', security: 'none', tcpSettings: { header: { type: 'none' } } };
   const shareLink = `vless://${clientId}@${input.serverAddress}:${input.port}?type=tcp&encryption=none&security=none#${shareName(input.name)}`;
   return finishInbound(input, nodeId, status, 'vless', 'None', settings, streamSettings, shareLink);
 }
 function vlessTlsSettings(sni) { const tlsSettings = { serverName: sni, minVersion: '1.2' }; const certificate = activeTlsSettings(); if (certificate) tlsSettings.certificates = [certificate]; return tlsSettings; }
 function makeVlessTls(input, nodeId, status) {
   const clientId = crypto.randomUUID(); const email = cleanText(input.email, `client-${nodeId}`); const sni = cleanText(input.sni, input.serverAddress);
-  const settings = { clients: [{ id: clientId, email }], decryption: 'none' }; const streamSettings = { network: 'tcp', security: 'tls', tlsSettings: vlessTlsSettings(sni) };
+  const settings = { clients: [{ id: clientId, email }], decryption: 'none', fallbacks: [] }; const streamSettings = { network: 'tcp', security: 'tls', tcpSettings: { header: { type: 'none' } }, tlsSettings: vlessTlsSettings(sni) };
   return finishInbound(input, nodeId, status, 'vless', 'TLS', settings, streamSettings, `vless://${clientId}@${input.serverAddress}:${input.port}?type=tcp&encryption=none&security=tls&sni=${encodeURIComponent(sni)}#${shareName(input.name)}`);
 }
 function makeVlessWs(input, nodeId, status) {
   const clientId = crypto.randomUUID(); const email = cleanText(input.email, `client-${nodeId}`); const sni = cleanText(input.sni, input.serverAddress); const wsPath = cleanText(input.path, '/vless', 180); const host = cleanText(input.host, sni, 180);
-  const settings = { clients: [{ id: clientId, email }], decryption: 'none' }; const streamSettings = { network: 'ws', security: 'tls', tlsSettings: vlessTlsSettings(sni), wsSettings: { path: wsPath, headers: { Host: host } } };
+  const settings = { clients: [{ id: clientId, email }], decryption: 'none', fallbacks: [] }; const streamSettings = { network: 'ws', security: 'tls', tlsSettings: vlessTlsSettings(sni), wsSettings: { path: wsPath, headers: { Host: host } } };
   return finishInbound(input, nodeId, status, 'vless', 'WebSocket + TLS', settings, streamSettings, `vless://${clientId}@${input.serverAddress}:${input.port}?type=ws&encryption=none&security=tls&sni=${encodeURIComponent(sni)}&host=${encodeURIComponent(host)}&path=${encodeURIComponent(wsPath)}#${shareName(input.name)}`);
 }
 function makeVlessGrpc(input, nodeId, status) {
   const clientId = crypto.randomUUID(); const email = cleanText(input.email, `client-${nodeId}`); const sni = cleanText(input.sni, input.serverAddress); const serviceName = cleanText(input.serviceName, 'vless-grpc', 120);
-  const settings = { clients: [{ id: clientId, email }], decryption: 'none' }; const streamSettings = { network: 'grpc', security: 'tls', tlsSettings: vlessTlsSettings(sni), grpcSettings: { serviceName, multiMode: false } };
+  const settings = { clients: [{ id: clientId, email }], decryption: 'none', fallbacks: [] }; const streamSettings = { network: 'grpc', security: 'tls', tlsSettings: vlessTlsSettings(sni), grpcSettings: { serviceName, multiMode: false } };
   return finishInbound(input, nodeId, status, 'vless', 'gRPC + TLS', settings, streamSettings, `vless://${clientId}@${input.serverAddress}:${input.port}?type=grpc&encryption=none&security=tls&sni=${encodeURIComponent(sni)}&serviceName=${encodeURIComponent(serviceName)}&mode=gun#${shareName(input.name)}`);
 }function makeTrojanTls(input, nodeId, status) {
   const password = token(18); const sni = cleanText(input.sni, input.serverAddress); const email = cleanText(input.email, `client-${nodeId}`);
   const tlsSettings = { serverName: sni, minVersion: '1.2' }; const certificate = activeTlsSettings();
   if (certificate) tlsSettings.certificates = [certificate];
   const settings = { clients: [{ password, email }], fallbacks: [] };
-  const streamSettings = { network: 'tcp', security: 'tls', tlsSettings };
+  const streamSettings = { network: 'tcp', security: 'tls', tcpSettings: { header: { type: 'none' } }, tlsSettings };
   const shareLink = `trojan://${password}@${input.serverAddress}:${input.port}?security=tls&type=tcp&sni=${encodeURIComponent(sni)}#${shareName(input.name)}`;
   return finishInbound(input, nodeId, status, 'trojan', 'TLS', settings, streamSettings, shareLink);
 }
@@ -164,11 +185,11 @@ function makeShadowsocks(input, nodeId, status) {
   const requestedMethod = cleanText(input.method, '2022-blake3-aes-128-gcm'); const method = ss2022Methods.has(requestedMethod) ? requestedMethod : '2022-blake3-aes-128-gcm';
   const serverPassword = ss2022Key(method); const userPassword = ss2022Key(method); const email = cleanText(input.email, `client-${nodeId}`);
   const settings = { method, password: serverPassword, network: 'tcp,udp', clients: [{ password: userPassword, email, level: 0 }] };
-  const streamSettings = { network: 'tcp', security: 'none' }; const credentials = Buffer.from(`${method}:${serverPassword}:${userPassword}`).toString('base64url');
+  const streamSettings = { network: 'tcp', security: 'none', tcpSettings: { header: { type: 'none' } } }; const credentials = Buffer.from(`${method}:${serverPassword}:${userPassword}`).toString('base64url');
   return finishInbound(input, nodeId, status, 'shadowsocks', 'SS2022', settings, streamSettings, `ss://${credentials}@${input.serverAddress}:${input.port}#${shareName(input.name)}`);
 }
 function finishInbound(input, nodeId, status, protocolCode, security, settings, streamSettings, shareLink) {
-  const sniffing = { enabled: true, destOverride: ['http', 'tls', 'quic', 'fakedns'] };
+  const sniffing = { enabled: true, destOverride: ['http', 'tls'], routeOnly: false };
   const xray = { listen: '', port: input.port, protocol: protocolCode, settings, streamSettings, tag: `inbound-${input.port}`, sniffing };
   return { id: nodeId, name: input.name, protocol: protocolLabels[input.protocolKey], protocolCode, template: input.templateName || templateNames[input.protocolKey], port: input.port, serverAddress: input.serverAddress, security, remark: input.remark, agentId: cleanText(input.agentId, '', 80), status, settings, streamSettings, sniffing, xray, shareLink };
 }
@@ -195,7 +216,48 @@ function shareLinkForInbound(inbound) {
   if (inbound.protocolCode === 'shadowsocks') { const credentials = Buffer.from(`${settings.method}:${settings.password}:${client.password}`).toString('base64url'); return `ss://${credentials}@${address}:${port}#${shareName(inbound.name)}`; }
   return inbound.shareLink || '';
 }
-function updateInbound(existing, data) {
+function objectFrom3xui(value, field) {
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { throw new Error(`${field} 不是有效的 JSON 对象`); }
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${field} 必须是 JSON 对象`);
+  return value;
+}
+function import3xuiInbound(data) {
+  const source = objectFrom3xui(data.config || data.inbound || data, '3x-ui 入站配置');
+  const protocolCode = cleanText(source.protocol, '').toLowerCase();
+  if (!['vless', 'trojan', 'shadowsocks'].includes(protocolCode)) throw new Error('目前仅支持导入 VLESS、Trojan 和 Shadowsocks 入站');
+  const listenPort = Number(source.port); const serverAddress = cleanText(data.serverAddress, '', 255);
+  if (!Number.isInteger(listenPort) || listenPort < 1 || listenPort > 65535) throw new Error('导入配置中的端口无效');
+  if (!serverAddress) throw new Error('请填写客户端连接此节点时使用的服务器地址');
+  const settings = objectFrom3xui(source.settings || {}, 'settings');
+  const streamSettings = objectFrom3xui(source.streamSettings || { network: 'tcp', security: 'none' }, 'streamSettings');
+  const sniffing = source.sniffing === undefined ? { enabled: true, destOverride: ['http', 'tls'], routeOnly: false } : objectFrom3xui(source.sniffing, 'sniffing');
+  const network = cleanText(streamSettings.network, 'tcp').toLowerCase(); const transportSecurity = cleanText(streamSettings.security, 'none').toLowerCase();
+  let protocolKey = protocolCode; let protocol = ''; let security = 'None';
+  if (protocolCode === 'vless') {
+    if (!Array.isArray(settings.clients) || !settings.clients[0]?.id) throw new Error('VLESS 配置缺少至少一个客户端 UUID');
+    if (transportSecurity === 'reality') { protocolKey = 'vless-reality'; protocol = 'VLESS + Reality'; security = 'Reality'; }
+    else if (network === 'ws') { protocolKey = 'vless-ws'; protocol = 'VLESS + WebSocket'; security = transportSecurity === 'tls' ? 'TLS' : 'None'; }
+    else if (network === 'grpc') { protocolKey = 'vless-grpc'; protocol = 'VLESS + gRPC'; security = transportSecurity === 'tls' ? 'TLS' : 'None'; }
+    else if (transportSecurity === 'tls') { protocolKey = 'vless-tls'; protocol = 'VLESS + TLS'; security = 'TLS'; }
+    else { protocolKey = 'vless'; protocol = 'VLESS'; }
+  } else if (protocolCode === 'trojan') {
+    if (!Array.isArray(settings.clients) || !settings.clients[0]?.password) throw new Error('Trojan 配置缺少至少一个客户端密码');
+    protocolKey = 'trojan-tls'; protocol = 'Trojan + TLS'; security = transportSecurity === 'tls' ? 'TLS' : 'None';
+  } else {
+    if (!settings.method || !settings.password) throw new Error('Shadowsocks 配置缺少 method 或 password');
+    protocolKey = 'shadowsocks'; protocol = 'Shadowsocks'; security = 'SS2022';
+  }
+  const inbound = {
+    id: id(), name: cleanText(data.name || source.remark || source.tag, `${protocol} ${listenPort}`, 120), protocol, protocolCode, template: '3x-ui 兼容导入', port: listenPort, serverAddress,
+    security, remark: cleanText(data.remark || source.remark, '', 180), agentId: cleanText(data.agentId, '', 80), status: source.enable === false ? 'stopped' : 'running', settings, streamSettings, sniffing,
+    xray: { listen: typeof source.listen === 'string' ? source.listen : '', port: listenPort, protocol: protocolCode, settings, streamSettings, tag: cleanText(source.tag, `inbound-${listenPort}`, 120), sniffing }
+  };
+  alignInboundWith3xui(inbound); inbound.template = `3x-ui ${protocolLabels[protocolKey] || protocol} 兼容配置`; inbound.shareLink = shareLinkForInbound(inbound);
+  if (!inbound.shareLink) throw new Error('导入配置无法生成客户端链接，请确认客户端字段完整');
+  return inbound;
+}function updateInbound(existing, data) {
   if (data.protocol && data.protocol !== existing.protocol) throw new Error('编辑节点时不能切换协议；请新建节点。');
   const candidate = buildNode({ ...data, protocol: existing.protocol }, existing.id, existing.status);
   if (!candidate) return null;
@@ -437,6 +499,14 @@ async function handleRelays(req, res, parts) {
     const svg = await QRCode.toString(inbound.shareLink, { type: 'svg', errorCorrectionLevel: 'M', margin: 1, width: 280, color: { dark: '#202030', light: '#ffffffff' } }); res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(svg);
   }
   if (parts.length === 2 && req.method === 'GET') return json(res, 200, readStore(inboundFile, seedInbounds, normalizeInbound).map(inboundSnapshot));
+  if (parts.length === 3 && parts[2] === 'import-3xui' && req.method === 'POST') {
+    let inbound; try { inbound = import3xuiInbound(await body(req)); } catch (error) { return json(res, 400, { error: error.message }); }
+    const agents = readAgents(); if (inbound.agentId && !agents.some(agent => agent.id === inbound.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' });
+    const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const scope = item => (item.agentId || '') === inbound.agentId;
+    if (inbounds.some(item => scope(item) && item.port === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' });
+    const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === inbound.agentId && relay.listenPort === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
+    inbounds.unshift(inbound); writeStore(inboundFile, inbounds); if (!inbound.agentId && inbound.status === 'running') await ensureLocalRuntime(); return json(res, 201, inboundSnapshot(inbound));
+  }
   if (parts.length === 2 && req.method === 'POST') {
     const inbound = buildNode(await body(req)); if (!inbound) return json(res, 400, { error: '节点名称、地址和端口必须有效' }); const agents = readAgents(); if (inbound.agentId && !agents.some(agent => agent.id === inbound.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' });
     const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const scope = item => (item.agentId || '') === inbound.agentId; if (inbounds.some(item => scope(item) && item.port === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === inbound.agentId && relay.listenPort === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
@@ -535,7 +605,7 @@ function appendRuntimeLog(value) { runtime.lastLog = `${runtime.lastLog}${String
 function startRuntime() {
   const probe = xrayProbe(); if (!probe.available) return { error: probe.error };
   if (runtime.child && runtime.child.exitCode === null && !runtime.child.killed) return { info: runtimeInfo() };
-  const config = runtimeConfig();
+  const config = runtimeConfig(); const validation = validateRuntimeConfig(config); if (!validation.ok) { runtime.lastError = validation.error; return { error: validation.error }; }
   writeStore(runtimeFile, config); runtime.lastError = ''; runtime.lastLog = '';
   const child = spawn(probe.binary, ['run', '-c', runtimeFile], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); runtime.child = child; runtime.startedAt = new Date().toISOString();
   child.stdout.on('data', appendRuntimeLog); child.stderr.on('data', appendRuntimeLog);
@@ -715,7 +785,7 @@ if (require.main === module) {
     https.createServer({ cert: fs.readFileSync(bootTls.certPath), key: fs.readFileSync(bootTls.keyPath) }, requestHandler).listen(httpsPort, panelHost, () => console.log(`3xUI Lite HTTPS: https://${panelHost}:${httpsPort}`));
   }
 }
-module.exports = { server, buildNode, createUser, readSettings };
+module.exports = { server, buildNode, import3xuiInbound, createUser, readSettings };
 
 
 
