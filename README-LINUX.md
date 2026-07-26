@@ -1,15 +1,15 @@
-# 3xUI Lite · Linux deployment
+# 3xUI Lite · Linux 部署说明
 
-This bundle runs the panel and its Agent management service on Linux with systemd.
+本部署包会在 Linux 上通过 systemd 运行面板及其 Agent 管理服务。
 
-## Requirements
+## 环境要求
 
-- Debian/Ubuntu, Rocky/Alma, CentOS, or another systemd-based Linux distribution
-- root or sudo access
-- Node.js 18 or later
-- Internet access for `npm ci`
+- Debian/Ubuntu、Rocky/Alma、CentOS，或其他支持 systemd 的 Linux 发行版
+- root 权限或 sudo 权限
+- Node.js 18 或更高版本（部署脚本可自动安装）
+- 可访问 npm 的网络环境
 
-## Install
+## 安装方式
 
 ```bash
 tar -xzf 3xui-lite-linux.tar.gz
@@ -17,14 +17,14 @@ cd 3xui-lite-linux
 sudo bash ./deploy-linux.sh
 ```
 
-The service is named `3xui-lite` and listens on port `3000` by default.
+服务名称为 `3xui-lite-agent-panel`，默认监听 `3000` 端口。
 
 ```bash
-sudo systemctl status 3xui-lite
-sudo journalctl -u 3xui-lite -f
+sudo systemctl status 3xui-lite-agent-panel
+sudo journalctl -u 3xui-lite-agent-panel -f
 ```
 
-Set another port when installing:
+安装时设置其他端口：
 
 ```bash
 sudo PORT=8443 bash ./deploy-linux.sh
@@ -32,11 +32,11 @@ sudo PORT=8443 bash ./deploy-linux.sh
 
 ## Xray Core
 
-The panel can install its local Xray Core from the System page. Agent machines can receive an Xray installation task from the **Install Xray** action; that workflow requires a Linux systemd Agent with root privileges and supports x64, arm64, and arm.
+可在面板的系统页面安装本机 Xray Core。Agent 机器可通过“安装 Xray”操作接收安装任务；该功能要求 Agent 运行在具有 root 权限的 systemd Linux 服务中，支持 x64、arm64 和 arm 架构。
 
-## Security
+## 安全建议
 
-- Change the initial `admin / admin` credentials immediately.
-- Put the panel behind HTTPS before exposing it publicly.
-- Open only the panel and explicitly configured node/relay ports in the firewall.
-- Runtime data (`settings.json`, node and user data, Agent tokens) is intentionally excluded from the source package and repository.
+- 立即修改初始 `admin / admin` 账号密码。
+- 面板公开访问前请配置 HTTPS。
+- 防火墙只开放面板端口，以及明确启用的节点和中转端口。
+- 运行时数据（`settings.json`、节点和用户数据、Agent 令牌）会被刻意排除在源码包和仓库之外。

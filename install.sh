@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command installer for 3xUI Lite Agent Panel
+# 3xUI Lite Agent Panel 一键安装脚本
 set -Eeuo pipefail
 
 REPOSITORY="${REPOSITORY:-https://github.com/binshao1230/3xui-lite-agent-panel}"
@@ -13,7 +13,7 @@ if command -v curl >/dev/null 2>&1; then
 elif command -v wget >/dev/null 2>&1; then
   wget -qO "${TMP_DIR}/source.tar.gz" "${REPOSITORY}/archive/refs/heads/${BRANCH}.tar.gz"
 else
-  echo "curl or wget is required."
+  echo "需要安装 curl 或 wget。"
   exit 1
 fi
 

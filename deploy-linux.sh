@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# 3xUI Lite Linux installer (systemd)
+# 3xUI Lite Linux 安装脚本（systemd）
 set -Eeuo pipefail
 
 if [[ "${EUID}" -ne 0 ]]; then
-  echo "Please run with sudo: sudo bash ./deploy-linux.sh"
+  echo "请使用 sudo 运行：sudo bash ./deploy-linux.sh"
   exit 1
 fi
 
@@ -14,7 +14,7 @@ install_node() {
     current="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)"
     if [[ "${current}" -ge 18 ]]; then return; fi
   fi
-  echo "Installing Node.js 20 LTS..."
+  echo "正在安装 Node.js 20 LTS..."
   if command_exists apt-get; then
     apt-get update
     apt-get install -y ca-certificates curl
@@ -31,7 +31,7 @@ install_node() {
   elif command_exists apk; then
     apk add --no-cache nodejs npm
   else
-    echo "No supported package manager found. Install Node.js 18+ manually and rerun."
+    echo "未找到受支持的软件包管理器。请手动安装 Node.js 18 或更高版本后重新运行。"
     exit 1
   fi
 }
@@ -43,7 +43,7 @@ install_node
 NODE_BIN="${NODE_BIN:-$(command -v node)}"
 NODE_MAJOR="$(${NODE_BIN} -p "process.versions.node.split('.')[0]")"
 if [[ "${NODE_MAJOR}" -lt 18 ]]; then
-  echo "Node.js 18+ is required; found $(${NODE_BIN} --version)."
+  echo "需要 Node.js 18 或更高版本；当前版本为 $(${NODE_BIN} --version)。"
   exit 1
 fi
 
@@ -60,7 +60,7 @@ chmod 0750 "${APP_DIR}"
 
 cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<UNIT
 [Unit]
-Description=3xUI Lite Agent Panel
+Description=3xUI Lite Agent 管理面板
 After=network-online.target
 Wants=network-online.target
 
@@ -83,5 +83,5 @@ systemctl enable --now "${SERVICE_NAME}"
 systemctl --no-pager --full status "${SERVICE_NAME}"
 
 echo
-echo "Installed. Open: http://SERVER_IP:${PORT:-3000}"
-echo "Default first-login credentials are admin / admin; change the password immediately."
+echo "安装完成。请访问：http://服务器IP:${PORT:-3000}"
+echo "首次登录账号密码为 admin / admin；请立即修改密码。"
