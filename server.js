@@ -345,7 +345,13 @@ function remoteRelaySnapshot(rule) {
   return { ...rule, runtimeStatus: runtime.status, lastError: runtime.lastError || rule.lastError || '', bytesIn: runtime.bytesIn, bytesOut: runtime.bytesOut, connections: runtime.connections };
 }
 function inboundSnapshot(inbound) {
-  if (!inbound.agentId) return inbound;
+  if (!inbound.agentId) {
+    if (inbound.status !== 'running') return inbound;
+    const info = runtimeInfo();
+    if (!info.available) return { ...inbound, status: 'error', desiredStatus: inbound.status, lastError: info.error || '未检测到 Xray Core' };
+    if (!info.running) return { ...inbound, status: 'error', desiredStatus: inbound.status, lastError: info.lastError || 'Xray Core 尚未启动' };
+    return { ...inbound, lastError: '' };
+  }
   const agent = readAgents().find(item => item.id === inbound.agentId); const reported = agent?.inboundStates?.find(item => item.id === inbound.id); const state = inbound.status !== 'running' ? 'stopped' : !agent ? 'error' : agentStatus(agent) === 'online' ? (reported?.status || 'starting') : agentStatus(agent);
   return { ...inbound, status: state, desiredStatus: inbound.status, lastError: state === 'error' ? (reported?.lastError || (agent?.xrayAvailable === false ? 'Agent 未检测到 Xray Core' : '远程节点启动失败')) : (reported?.lastError || ''), agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
 }function relayTraffic(runtime, direction, size) { if (direction === 'in') runtime.bytesIn += size; else runtime.bytesOut += size; }
@@ -434,17 +440,17 @@ async function handleRelays(req, res, parts) {
   if (parts.length === 2 && req.method === 'POST') {
     const inbound = buildNode(await body(req)); if (!inbound) return json(res, 400, { error: '节点名称、地址和端口必须有效' }); const agents = readAgents(); if (inbound.agentId && !agents.some(agent => agent.id === inbound.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' });
     const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const scope = item => (item.agentId || '') === inbound.agentId; if (inbounds.some(item => scope(item) && item.port === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === inbound.agentId && relay.listenPort === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
-    inbounds.unshift(inbound); writeStore(inboundFile, inbounds); if (!inbound.agentId) await syncRuntimeIfRunning(); return json(res, 201, inboundSnapshot(inbound));
+    inbounds.unshift(inbound); writeStore(inboundFile, inbounds); if (!inbound.agentId) await ensureLocalRuntime(); return json(res, 201, inboundSnapshot(inbound));
   }
   if (!Number.isInteger(inboundId)) return json(res, 404, { error: 'Not found' });
   if (req.method === 'PATCH') {
     const data = await body(req); const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const index = inbounds.findIndex(item => item.id === inboundId); if (index < 0) return json(res, 404, { error: 'Not found' }); const inbound = inbounds[index];
-    if (Object.prototype.hasOwnProperty.call(data, 'status') && Object.keys(data).length === 1) { if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' }); inbound.status = data.status; writeStore(inboundFile, inbounds); if (!inbound.agentId) await syncRuntimeIfRunning(); return json(res, 200, inboundSnapshot(inbound)); }
+    if (Object.prototype.hasOwnProperty.call(data, 'status') && Object.keys(data).length === 1) { if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' }); inbound.status = data.status; writeStore(inboundFile, inbounds); if (!inbound.agentId) { if (inbound.status === 'running') await ensureLocalRuntime(); else await syncRuntimeIfRunning(); } return json(res, 200, inboundSnapshot(inbound)); }
     let updated; try { updated = updateInbound(inbound, data); } catch (error) { return json(res, 400, { error: error.message }); } if (!updated) return json(res, 400, { error: '节点名称、地址和端口必须有效' });
     const agents = readAgents(); if (updated.agentId && !agents.some(agent => agent.id === updated.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' });
     if (inbounds.some(item => item.id !== inboundId && (item.agentId || '') === updated.agentId && item.port === updated.port)) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' });
     const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === updated.agentId && relay.listenPort === updated.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
-    inbounds[index] = updated; writeStore(inboundFile, inbounds); if (!inbound.agentId || !updated.agentId) await syncRuntimeIfRunning(); return json(res, 200, inboundSnapshot(updated));
+    inbounds[index] = updated; writeStore(inboundFile, inbounds); if (!inbound.agentId || !updated.agentId) { if (!updated.agentId && updated.status === 'running') await ensureLocalRuntime(); else await syncRuntimeIfRunning(); } return json(res, 200, inboundSnapshot(updated));
   }
   if (req.method === 'DELETE') { const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const inbound = inbounds.find(item => item.id === inboundId); if (!inbound) return json(res, 404, { error: 'Not found' }); writeStore(inboundFile, inbounds.filter(item => item.id !== inboundId)); if (!inbound.agentId) await syncRuntimeIfRunning(); return json(res, 204); }
   return json(res, 405, { error: 'Method not allowed' });
@@ -546,6 +552,13 @@ function validateRuntimeConfig(config) {
   finally { try { fs.unlinkSync(file); } catch {} }
 }
 function waitForExit(child) { return new Promise(resolve => { if (!child || child.exitCode !== null) return resolve(); const timer = setTimeout(resolve, 3000); child.once('exit', () => { clearTimeout(timer); resolve(); }); }); }
+async function ensureLocalRuntime() {
+  const info = runtimeInfo(); if (!info.available) return { error: info.error || '未检测到 Xray Core' };
+  if (info.running) return syncRuntimeIfRunning();
+  const started = startRuntime(); if (started.error) return { error: started.error };
+  await new Promise(resolve => setTimeout(resolve, 450)); const current = runtimeInfo();
+  return current.running ? { started: true } : { error: current.lastError || 'Xray Core 启动失败，请查看系统日志' };
+}
 async function syncRuntimeIfRunning() {
   const active = Boolean(runtime.child && runtime.child.exitCode === null && !runtime.child.killed); if (!active) return { reloaded: false };
   const config = runtimeConfig(); const check = validateRuntimeConfig(config); if (!check.ok) { runtime.lastError = `新配置未应用：${check.error}`; return { error: runtime.lastError }; }
