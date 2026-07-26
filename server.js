@@ -126,8 +126,13 @@ function currentSession(req) {
   if (!session || session.expiresAt < Date.now()) { if (value) sessions.delete(value); return null; }
   return { token: value, ...session };
 }
-function sessionCookie(value, seconds = 0) {
-  const secure = process.env.SECURE_COOKIE === 'true' ? '; Secure' : '';
+function requestIsSecure(req) {
+  if (req.socket?.encrypted) return true;
+  if (process.env.TRUST_PROXY !== 'true') return false;
+  return String(req.headers['x-forwarded-proto'] || '').split(',').some(value => value.trim().toLowerCase() === 'https');
+}
+function sessionCookie(req, value, seconds = 0) {
+  const secure = process.env.SECURE_COOKIE === 'true' && requestIsSecure(req) ? '; Secure' : '';
   return `session=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${seconds}${secure}`;
 }
 function requireAuth(req, res) {
@@ -559,11 +564,11 @@ function createRelay(data) {
     }
     loginAttempts.delete(remote);
     const value = token(32); sessions.set(value, { username: settings.admin.username, expiresAt: Date.now() + 8 * 60 * 60 * 1000 });
-    return json(res, 200, { ok: true, mustChangePassword: settings.admin.mustChangePassword }, { 'Set-Cookie': sessionCookie(value, 8 * 60 * 60) });
+    return json(res, 200, { ok: true, mustChangePassword: settings.admin.mustChangePassword, transportWarning: process.env.SECURE_COOKIE === 'true' && !requestIsSecure(req) ? '当前访问不是受信任的 HTTPS，请使用 HTTPS 反向代理访问面板。' : '' }, { 'Set-Cookie': sessionCookie(req, value, 8 * 60 * 60) });
   }
   if (pathname === '/api/auth/logout' && req.method === 'POST') {
     const session = currentSession(req); if (session) sessions.delete(session.token);
-    return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie('', 0) });
+    return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, '', 0) });
   }
   return false;
 }
@@ -822,7 +827,7 @@ async function installXray() {
     if (typeof data.newPassword !== 'string' || data.newPassword.length < 10 || data.newPassword.length > 128) return json(res, 400, { error: '新密码需为 10–128 个字符' });
     if (data.newPassword === data.currentPassword) return json(res, 400, { error: '新密码不能与当前密码相同' });
     Object.assign(settings.admin, passwordHash(data.newPassword), { mustChangePassword: false }); writeSettings(settings); sessions.clear();
-    return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie('', 0) });
+    return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, '', 0) });
   }
   if (pathname === '/api/system/tls' && req.method === 'POST') {
     const data = await body(req); const domain = cleanText(data.domain, '', 253).toLowerCase(); const email = cleanText(data.email, '', 100); const certPath = cleanText(data.certPath, '', 512); const keyPath = cleanText(data.keyPath, '', 512);
