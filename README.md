@@ -88,6 +88,6 @@ TLS、WebSocket、gRPC 和 Trojan 模板不会再在缺少证书时写入会使 
 
 - 不要直接把 HTTP 面板暴露到公网；使用 Nginx、Caddy 或负载均衡器提供 HTTPS，并将面板端口限制为反向代理或管理网段可访问。
 - HTTPS 反向代理场景可用 `SECURE_COOKIE=true TRUST_PROXY=true` 部署，使管理员会话 Cookie 仅通过 HTTPS 发送，并信任反向代理的 HTTPS 标记：`curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/main/install.sh | sudo SECURE_COOKIE=true TRUST_PROXY=true bash`。面板端口必须同时限制为仅反向代理可访问。
-- 首次登录必须修改默认管理员密码，未完成前后端会拒绝所有管理操作。
+- 首次登录后请尽快修改默认管理员密码；面板不会强制拦截管理操作。
 - 面板数据采用私有文件权限和原子写入；仍应对 `/opt/3xui-lite-agent-panel` 中的运行数据定期离机备份，并在升级前创建快照。
 - 建议仅放行面板 HTTPS、已启用节点端口和必要的 Agent 回连路径；Agent 令牌、管理员 Cookie 与节点 JSON 都应视为敏感凭据。

@@ -40,12 +40,12 @@ function token(bytes = 16) { return crypto.randomBytes(bytes).toString('base64ur
 function id() { return Date.now() + Math.floor(Math.random() * 1000); }
 function passwordHash(password, salt = token(16)) { return { salt, hash: crypto.scryptSync(password, salt, 64).toString('base64') }; }
 function defaultSettings() {
-  return { admin: { username: 'admin', ...passwordHash('admin'), mustChangePassword: true }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '' } };
+  return { admin: { username: 'admin', ...passwordHash('admin'), mustChangePassword: false }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '' } };
 }
 function readSettings() {
   try {
     const data = JSON.parse(fs.readFileSync(settingFile, 'utf8'));
-    if (data?.admin?.salt && data?.admin?.hash) return { admin: { username: 'admin', mustChangePassword: false, ...data.admin }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '', ...data.tls } };
+    if (data?.admin?.salt && data?.admin?.hash) return { admin: { username: 'admin', ...data.admin, mustChangePassword: false }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '', ...data.tls } };
   } catch {}
   const settings = defaultSettings();
   writeSettings(settings);
@@ -861,7 +861,6 @@ async function requestHandler(req, res) {
     if (parts[0] === 'api' && parts[1] === 'agent') { await reconcileExpiredUsers(); return handleAgentGateway(req, res, parts); }
     if (parts[0] === 'api') {
       if (!requireAuth(req, res)) return;
-      if (readSettings().admin.mustChangePassword && !(parts[1] === 'system' && url.pathname === '/api/system/password')) return json(res, 403, { error: '首次登录必须先修改默认管理员密码' });
       await reconcileExpiredUsers();
       if (parts[1] === 'relays') return handleRelays(req, res, parts);
       if (parts[1] === 'agents') return handleAgents(req, res, parts);
