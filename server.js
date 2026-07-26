@@ -466,9 +466,10 @@ async function diagnoseInbound(inbound, repair = false) {
 function relayTraffic(runtime, direction, size) { if (direction === 'in') runtime.bytesIn += size; else runtime.bytesOut += size; }
 function createTcpRelay(rule, runtime) {
   const server = net.createServer(client => {
-    runtime.connections++; const upstream = net.connect({ host: rule.targetHost, port: rule.targetPort });
+    runtime.connections++; const upstream = net.connect({ host: rule.targetHost, port: rule.targetPort }); let closed = false;
+    const close = () => { if (closed) return; closed = true; runtime.connections = Math.max(0, runtime.connections - 1); client.destroy(); upstream.destroy(); };
     client.on('data', chunk => relayTraffic(runtime, 'in', chunk.length)); upstream.on('data', chunk => relayTraffic(runtime, 'out', chunk.length));
-    client.pipe(upstream); upstream.pipe(client); const close = () => { client.destroy(); upstream.destroy(); }; client.on('error', close); upstream.on('error', close);
+    client.on('error', error => { runtime.lastError = error.message; close(); }); upstream.on('error', error => { runtime.lastError = error.message; close(); }); client.on('close', close); upstream.on('close', close); client.pipe(upstream); upstream.pipe(client);
   });
   runtime.servers.push(server); return new Promise((resolve, reject) => { const fail = error => reject(error); server.once('error', fail); server.listen(rule.listenPort, rule.bindAddress, () => { server.removeListener('error', fail); server.on('error', error => { runtime.status = 'error'; runtime.lastError = error.message; }); resolve(); }); });
 }
@@ -795,7 +796,7 @@ async function installXray() {
     if (!settings.tls.certPath || !settings.tls.keyPath || !fs.existsSync(settings.tls.certPath) || !fs.existsSync(settings.tls.keyPath)) return json(res, 400, { error: '证书文件不可用，请先保存正确路径或申请证书' });
     const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); let changed = 0;
     for (const inbound of inbounds) if (inbound.streamSettings?.security === 'tls') { inbound.streamSettings.tlsSettings = { ...(inbound.streamSettings.tlsSettings || {}), certificates: [{ certificateFile: settings.tls.certPath, keyFile: settings.tls.keyPath }] }; inbound.xray.streamSettings = inbound.streamSettings; changed++; }
-    writeStore(inboundFile, inbounds); await syncRuntimeIfRunning(); return json(res, 200, { changed, message: `已将证书写入 ${changed} 个 TLS 入站（VLESS、WebSocket、gRPC 与 Trojan）。` });
+    writeStore(inboundFile, inbounds); if (inbounds.some(inbound => inbound.status === 'running' && !inbound.agentId)) await ensureLocalRuntime(); else await syncRuntimeIfRunning(); return json(res, 200, { changed, message: `已将证书写入 ${changed} 个 TLS 入站（VLESS、WebSocket、gRPC 与 Trojan）。` });
   }
   return json(res, 405, { error: 'Method not allowed' });
 }

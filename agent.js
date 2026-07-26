@@ -9,7 +9,7 @@ const dgram = require('node:dgram');
 const http = require('node:http');
 const https = require('node:https');
 
-const AGENT_VERSION = '0.4.1';
+const AGENT_VERSION = '0.5.2';
 function option(name, fallback = '') { const index = process.argv.indexOf(`--${name}`); return index >= 0 ? (process.argv[index + 1] || '') : (process.env[`AGENT_${name.toUpperCase()}`] || fallback); }
 const controller = option('controller').replace(/\/$/, '');
 const agentStartedAt = new Date().toISOString();
@@ -21,18 +21,28 @@ const xrayConfigFile = path.join(path.dirname(__filename), 'agent-xray-config.js
 function xrayBinary() { const local = path.join(path.dirname(__filename), 'runtime', process.platform === 'win32' ? 'xray.exe' : 'xray'); return process.env.XRAY_BIN || (fs.existsSync(local) ? local : (process.platform === 'win32' ? 'xray.exe' : 'xray')); }
 function xrayProbe() { const binary = xrayBinary(); const result = spawnSync(binary, ['version'], { encoding: 'utf8', timeout: 5000, windowsHide: true }); if (result.error || result.status !== 0) return { available: false, version: '', error: result.error?.code === 'ENOENT' ? 'Xray Core 未安装' : (result.stderr || result.error?.message || 'Xray Core 不可用').slice(0, 240) }; return { available: true, version: (result.stdout || result.stderr || '').split(/\r?\n/)[0].trim(), error: '' }; }
 function appendXrayLog(value) { xrayRuntime.lastLog = `${xrayRuntime.lastLog}${String(value || '')}`.slice(-1200); }
-function stopXray() { if (xrayRuntime.child && xrayRuntime.child.exitCode === null && !xrayRuntime.child.killed) try { xrayRuntime.child.kill(); } catch {} xrayRuntime.child = null; xrayRuntime.status = 'stopped'; }
+function waitForXrayExit(child, timeout = 3000) { return new Promise(resolve => { if (!child || child.exitCode !== null || child.killed) return resolve(); const timer = setTimeout(resolve, timeout); child.once('exit', () => { clearTimeout(timer); resolve(); }); }); }
+async function stopXray() {
+  const child = xrayRuntime.child;
+  if (child && child.exitCode === null && !child.killed) try { child.kill(); } catch {}
+  await waitForXrayExit(child);
+  if (xrayRuntime.child === child) xrayRuntime.child = null;
+  xrayRuntime.status = 'stopped';
+}
 function inboundStates() { return xrayRuntime.tasks.map(task => ({ id: task.id, status: xrayRuntime.status, lastError: xrayRuntime.lastError, updatedAt: new Date().toISOString() })); }
-function verifyTcpListener(port) { return new Promise(resolve => { const socket = net.connect({ host: '127.0.0.1', port }, () => { socket.destroy(); resolve(true); }); socket.setTimeout(1500); socket.on('error', () => resolve(false)); socket.on('timeout', () => { socket.destroy(); resolve(false); }); }); }
+function verifyTcpListener(port) { return new Promise(resolve => { const socket = net.connect({ host: '127.0.0.1', port }); let done = false; const finish = value => { if (done) return; done = true; socket.destroy(); resolve(value); }; socket.setTimeout(1500); socket.once('connect', () => finish(true)); socket.once('error', () => finish(false)); socket.once('timeout', () => finish(false)); }); }
 async function syncInbounds(tasks) {
   const desired = (Array.isArray(tasks) ? tasks : []).filter(task => Number.isInteger(Number(task.id)) && task.xray).map(task => ({ ...task, id: Number(task.id) })); const signature = JSON.stringify(desired);
-  if (!desired.length) { stopXray(); xrayRuntime.tasks = []; xrayRuntime.signature = signature; xrayRuntime.lastError = ''; return; }
+  if (!desired.length) { await stopXray(); xrayRuntime.tasks = []; xrayRuntime.signature = signature; xrayRuntime.lastError = ''; return; }
   if (signature === xrayRuntime.signature && xrayRuntime.child && xrayRuntime.child.exitCode === null && !xrayRuntime.child.killed) return;
-  stopXray(); xrayRuntime.tasks = desired; xrayRuntime.signature = signature; xrayRuntime.status = 'starting'; xrayRuntime.lastError = ''; const probe = xrayProbe();
+  await stopXray(); xrayRuntime.tasks = desired; xrayRuntime.signature = signature; xrayRuntime.status = 'starting'; xrayRuntime.lastError = ''; const probe = xrayProbe();
   if (!probe.available) { xrayRuntime.status = 'error'; xrayRuntime.lastError = probe.error; return; }
   const inbounds = desired.map(task => { const inbound = JSON.parse(JSON.stringify(task.xray)); if (inbound.listen === '') delete inbound.listen; return inbound; }); const config = { log: { loglevel: 'warning' }, inbounds, outbounds: [{ protocol: 'freedom', tag: 'direct' }, { protocol: 'blackhole', tag: 'blocked' }] }; fs.writeFileSync(xrayConfigFile, JSON.stringify(config, null, 2), { mode: 0o600 });
   const check = spawnSync(xrayBinary(), ['run', '-test', '-c', xrayConfigFile], { encoding: 'utf8', timeout: 10000, windowsHide: true }); if (check.error || check.status !== 0) { xrayRuntime.status = 'error'; xrayRuntime.lastError = (check.stderr || check.stdout || check.error?.message || 'Xray 配置校验失败').slice(0, 500); return; }
-  const child = spawn(xrayBinary(), ['run', '-c', xrayConfigFile], { cwd: path.dirname(__filename), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); xrayRuntime.child = child; child.stdout.on('data', appendXrayLog); child.stderr.on('data', appendXrayLog); child.on('error', error => { xrayRuntime.status = 'error'; xrayRuntime.lastError = error.message; }); child.on('exit', (code, signal) => { if (code && code !== 0) { xrayRuntime.status = 'error'; xrayRuntime.lastError = `Xray exited (${code}${signal ? `/${signal}` : ''})`; } else if (xrayRuntime.status !== 'stopped') xrayRuntime.status = 'stopped'; xrayRuntime.child = null; }); await new Promise(resolve => setTimeout(resolve, 500)); const listening = await verifyTcpListener(desired[0].port); if (!listening || !xrayRuntime.child || xrayRuntime.child.exitCode !== null) { stopXray(); xrayRuntime.status = 'error'; xrayRuntime.lastError = xrayRuntime.lastError || `Xray 未在端口 ${desired[0].port} 建立监听`; return; } xrayRuntime.status = 'running'; console.log(`[agent] Xray started with ${desired.length} inbound(s)`);
+  const child = spawn(xrayBinary(), ['run', '-c', xrayConfigFile], { cwd: path.dirname(__filename), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); xrayRuntime.child = child; child.stdout.on('data', appendXrayLog); child.stderr.on('data', appendXrayLog); child.on('error', error => { if (xrayRuntime.child === child) { xrayRuntime.status = 'error'; xrayRuntime.lastError = error.message; } }); child.on('exit', (code, signal) => { if (xrayRuntime.child !== child) return; if (code && code !== 0) { xrayRuntime.status = 'error'; xrayRuntime.lastError = `Xray exited (${code}${signal ? `/${signal}` : ''})`; } else if (xrayRuntime.status !== 'stopped') xrayRuntime.status = 'stopped'; xrayRuntime.child = null; });
+  await new Promise(resolve => setTimeout(resolve, 500)); const checks = await Promise.all(desired.map(task => verifyTcpListener(task.port))); const missing = desired.filter((task, index) => !checks[index]).map(task => task.port);
+  if (missing.length || !xrayRuntime.child || xrayRuntime.child.exitCode !== null) { await stopXray(); xrayRuntime.status = 'error'; xrayRuntime.lastError = xrayRuntime.lastError || `Xray 未在端口 ${missing.join(', ') || desired[0].port} 建立监听`; return; }
+  xrayRuntime.status = 'running'; console.log(`[agent] Xray started with ${desired.length} inbound(s)`);
 }
 const stateFile = path.join(path.dirname(__filename), '.3xui-lite-agent-state.json');
 function readAgentState() { try { const state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); return state && typeof state === 'object' ? state : {}; } catch { return {}; } }
@@ -105,4 +115,13 @@ async function syncRelays(tasks) {
 async function heartbeat() {
   const probe = xrayProbe(); const response = await postJson(`${controller}/api/agent/heartbeat`, { id, token, info: { version: AGENT_VERSION, hostname: os.hostname(), platform: `${process.platform} ${os.release()}`, arch: process.arch, nodeVersion: process.version, uptimeSeconds: Math.floor(os.uptime()), memoryTotal: os.totalmem(), memoryFree: os.freemem(), cpus: os.cpus().length, addresses: Object.values(os.networkInterfaces()).flat().filter(item => item && !item.internal && item.address).map(item => item.address), processId: process.pid, agentStartedAt, updateAck: agentState.updateAck || '', xrayInstallAck: agentState.xrayInstallAck || '', xrayInstalling: agentState.xrayInstalling === true, xrayInstallError: agentState.xrayInstallError || '', xrayAvailable: probe.available, xrayVersion: probe.version, inboundStates: inboundStates(), relayStates: relayStates() } });
   await syncRelays(response.relays); await syncInbounds(response.inbounds); if (response.xrayInstall) await installXrayCore(response.xrayInstall); else if (agentState.xrayInstallAck) { agentState.xrayInstallAck = ''; saveAgentState(); } if (response.update) await applyUpdate(response.update); else if (agentState.updateAck) { agentState.updateAck = ''; saveAgentState(); } console.log(`[agent] heartbeat accepted; ${response.relays?.length || 0} relay / ${response.inbounds?.length || 0} inbound task(s)`); return Number(response.intervalSeconds || 15) * 1000;
-}(async () => { const handleFailure = error => { if (error.statusCode === 401 || error.statusCode === 403) { for (const relayId of [...relays.keys()]) stopRelay(relayId); console.error(`[agent] authorization was revoked; all relays stopped: ${error.message}`); return; } console.error(`[agent] heartbeat failed: ${error.message}`); }; try { const interval = await heartbeat(); if (once) { await heartbeat(); return; } setInterval(() => heartbeat().catch(handleFailure), interval); } catch (error) { handleFailure(error); if (once) process.exitCode = 1; else setInterval(() => heartbeat().catch(handleFailure), 15000); } })();
+}
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return; shuttingDown = true; console.log(`[agent] received ${signal}, stopping relay and Xray processes`);
+  for (const relayId of [...relays.keys()]) stopRelay(relayId);
+  await stopXray(); process.exit(0);
+}
+process.once('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(1)); });
+process.once('SIGINT', () => { shutdown('SIGINT').catch(() => process.exit(1)); });
+(async () => { const handleFailure = error => { if (error.statusCode === 401 || error.statusCode === 403) { for (const relayId of [...relays.keys()]) stopRelay(relayId); stopXray().catch(() => {}); console.error(`[agent] authorization was revoked; all relays and Xray stopped: ${error.message}`); return; } console.error(`[agent] heartbeat failed: ${error.message}`); }; try { const interval = await heartbeat(); if (once) { await heartbeat(); return; } setInterval(() => heartbeat().catch(handleFailure), interval); } catch (error) { handleFailure(error); if (once) process.exitCode = 1; else setInterval(() => heartbeat().catch(handleFailure), 15000); } })();
