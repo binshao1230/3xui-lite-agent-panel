@@ -25,11 +25,7 @@ const networkState = { publicAddress: '', source: '', checkedAt: '', error: '', 
 const relayRuntimes = new Map();
 const privateFiles = new Set(['settings.json', 'users.json', 'inbounds.json', 'relays.json', 'traffic.json', 'agents.json', 'runtime-xray.json']);
 
-const seedRelays = [
-  { id: 1, name: 'Tokyo BGP', protocol: 'VLESS + Reality', entry: 'Tokyo', exit: 'Los Angeles', host: 'us-west-01.example.net:443', status: 'running', latency: 42 },
-  { id: 2, name: 'Hong Kong Express', protocol: 'Trojan + TLS', entry: 'Hong Kong', exit: 'Singapore', host: 'sg-core-02.example.net:443', status: 'running', latency: 28 },
-  { id: 3, name: 'Frankfurt Backup', protocol: 'VLESS + Reality', entry: 'Frankfurt', exit: 'Amsterdam', host: 'nl-backup.example.net:443', status: 'stopped', latency: 66 }
-];
+const seedRelays = [];
 const protocolMap = { 'VLESS + Reality': 'vless-reality', VLESS: 'vless', 'VLESS + TLS': 'vless-tls', 'VLESS + WebSocket': 'vless-ws', 'VLESS + gRPC': 'vless-grpc', 'Trojan + TLS': 'trojan-tls', Shadowsocks: 'shadowsocks' };
 const protocolLabels = Object.fromEntries(Object.entries(protocolMap).map(([label, value]) => [value, label]));
 const templateNames = { 'vless-reality': 'VLESS Reality 模板', vless: '纯 VLESS TCP 模板', 'vless-tls': 'VLESS TLS 模板', 'vless-ws': 'VLESS WebSocket + TLS 模板', 'vless-grpc': 'VLESS gRPC + TLS 模板', 'trojan-tls': 'Trojan TLS 模板', shadowsocks: 'Shadowsocks 2022 模板' };
@@ -37,10 +33,7 @@ const protocols = new Set(Object.keys(protocolMap));
 const statuses = new Set(['running', 'stopped']);
 const ss2022Methods = new Set(['2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305']);
 const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8' };
-const seedUsers = [
-  { id: 201, name: 'Demo User', email: 'demo@example.com', limitGB: 100, usedGB: 18.6, expire: '2026-12-31', status: 'running' },
-  { id: 202, name: 'Trial User', email: 'trial@example.com', limitGB: 20, usedGB: 2.3, expire: '2026-08-31', status: 'running' }
-];
+const seedUsers = [];
 
 function token(bytes = 16) { return crypto.randomBytes(bytes).toString('base64url'); }
 function id() { return Date.now() + Math.floor(Math.random() * 1000); }
@@ -65,6 +58,21 @@ function readStore(file, fallback, normalizer) {
   } catch { return fallback.map(item => ({ ...item })); }
 }
 function writeStore(file, items) { fs.writeFileSync(file, JSON.stringify(items, null, 2)); }
+function removeLegacyDemoData() {
+  const remove = (file, predicate) => {
+    try {
+      const items = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!Array.isArray(items)) return;
+      const kept = items.filter(item => !predicate(item));
+      if (kept.length !== items.length) writeStore(file, kept);
+    } catch {}
+  };
+  remove(relayFile, item => ['Tokyo BGP', 'Hong Kong Express', 'Frankfurt Backup'].includes(item?.name));
+  remove(inboundFile, item => ['VLESS Reality Demo', 'Trojan TLS Demo', 'Shadowsocks Demo'].includes(item?.name));
+  remove(userFile, item => ['demo@example.com', 'trial@example.com'].includes(String(item?.email || '').toLowerCase()));
+  remove(trafficFile, item => [201, 202].includes(Number(item?.userId)));
+}
+removeLegacyDemoData();
 function json(res, code, payload, headers = {}) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(code === 204 ? '' : JSON.stringify(payload));
@@ -176,11 +184,7 @@ function buildNode(data, forcedId = id(), forcedStatus = 'running') {
   if (protocolKey === 'shadowsocks') return makeShadowsocks(input, forcedId, forcedStatus);
   return makeVlessReality(input, forcedId, forcedStatus);
 }
-const seedInbounds = [
-  buildNode({ name: 'VLESS Reality Demo', protocol: 'VLESS + Reality', port: 12001, serverAddress: 'example.com', sni: 'www.microsoft.com', dest: 'www.microsoft.com:443', remark: 'Primary inbound' }, 101),
-  buildNode({ name: 'Trojan TLS Demo', protocol: 'Trojan + TLS', port: 12002, serverAddress: 'example.com', sni: 'example.com', remark: 'Backup endpoint' }, 102),
-  buildNode({ name: 'Shadowsocks Demo', protocol: 'Shadowsocks', port: 12003, serverAddress: 'example.com', remark: 'Compatibility access' }, 103, 'stopped')
-];
+const seedInbounds = [];
 function normalizeInbound(item) {
   if (!item || typeof item !== 'object' || item.shareLink) return item;
   return buildNode({ name: item.name || item.remark || `Inbound ${item.port || ''}`, protocol: protocols.has(item.protocol) ? item.protocol : 'VLESS + Reality', port: item.port, serverAddress: item.serverAddress || 'example.com', sni: item.sni || 'www.microsoft.com', dest: item.dest || 'www.microsoft.com:443', remark: item.remark || '' }, item.id || id(), item.status || 'running') || item;

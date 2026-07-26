@@ -92,6 +92,13 @@ function formatGB(value) { return Number(value || 0).toLocaleString('zh-CN', { m
 function renderTraffic() {
   if (!traffic) return;
   const summary = traffic.summary; $('#trafficTotal').innerHTML = `${formatGB(summary.totalGB)} <small>GB</small>`; $('#trafficRecorded').innerHTML = `${formatGB(summary.recordedGB)} <small>GB</small>`; $('#trafficActive').textContent = summary.activeUsers; $('#trafficRecords').textContent = summary.totalRecords;
+  const overviewTraffic = $('#overviewTraffic'), overviewNote = $('#overviewTrafficNote'), overviewChart = $('#overviewChart');
+  if (overviewTraffic) overviewTraffic.innerHTML = `${formatGB(summary.recordedGB)} <small>GB</small>`;
+  if (overviewNote) overviewNote.textContent = summary.totalRecords ? `已记录 ${summary.totalRecords} 条流量` : '暂无流量记录';
+  if (overviewChart) {
+    const activeDays = traffic.daily.filter(item => Number(item.gb) > 0);
+    overviewChart.innerHTML = activeDays.length ? activeDays.map(item => `<span>${esc(item.day)}：<b>${formatGB(item.gb)} GB</b></span>`).join('　') : '<p class="empty-state">暂无流量数据。</p>';
+  }
   const maximum = Math.max(1, ...traffic.daily.map(item => item.gb));
   $('#trafficDays').innerHTML = traffic.daily.map(item => `<div><span title="${esc(item.day)}：${formatGB(item.gb)} GB"><i style="height:${Math.max(5, item.gb / maximum * 100)}%"></i></span><small>${esc(item.day.slice(5))}</small><b>${formatGB(item.gb)}</b></div>`).join('');
   $('#trafficInbounds').innerHTML = traffic.inbounds.length ? traffic.inbounds.map(item => `<div class="usage-row"><div><strong>${esc(item.name)}</strong><small>${esc(item.protocol)}</small></div><b>${formatGB(item.gb)} GB</b></div>`).join('') : '<p class="empty-state">暂无入站流量记录。</p>';

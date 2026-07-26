@@ -45,11 +45,11 @@
       <div class="metrics">
         <article><b>◈</b><div>在线入站<h2 id="inboundCount">0 <small>/ 0</small></h2><small class="up">自动统计已启用节点</small></div></article>
         <article><b>⇄</b><div>活跃中转<h2 id="activeCount">0</h2><small>按规则状态统计</small></div></article>
-        <article><b>⌁</b><div>今日流量<h2>18.6 <small>GB</small></h2><small class="up">演示统计数据</small></div></article>
+        <article><b>⌁</b><div>今日流量<h2 id="overviewTraffic">0 <small>GB</small></h2><small class="up" id="overviewTrafficNote">暂无流量记录</small></div></article>
         <article><b>◎</b><div>在线用户<h2 id="userCount">0</h2><small class="up">配额与有效期已启用</small></div></article>
       </div>
       <div class="grid">
-        <article class="panel"><div class="panelhead"><div><h3>流量趋势</h3><p>最近 7 天出站流量</p></div><button>近 7 天⌄</button></div><div class="chart"><svg viewBox="0 0 700 210" preserveAspectRatio="none"><defs><linearGradient id="a" x1="0" x2="0" y2="1"><stop stop-color="#7868f8" stop-opacity=".35"/><stop offset="1" stop-color="#7868f8" stop-opacity="0"/></linearGradient></defs><path d="M0 154C45 138 65 156 100 128S160 92 200 112S255 134 300 100S350 70 395 91S450 132 490 99S540 56 585 72S645 85 700 30V210H0Z" fill="url(#a)"/><path d="M0 154C45 138 65 156 100 128S160 92 200 112S255 134 300 100S350 70 395 91S450 132 490 99S540 56 585 72S645 85 700 30" fill="none" stroke="#7768f5" stroke-width="3"/></svg><span>7/20　　7/21　　7/22　　7/23　　7/24　　7/25　　今天</span></div></article>
+        <article class="panel"><div class="panelhead"><div><h3>流量趋势</h3><p>最近 7 天出站流量</p></div><button>近 7 天⌄</button></div><div class="chart" id="overviewChart"><p class="empty-state">暂无流量数据。</p></div></article>
         <article class="panel"><div class="panelhead"><div><h3>中转状态</h3><p>实时链路健康度</p></div><a data-go="relays">查看全部 →</a></div><div id="health"></div></article>
       </div>
     </section>
