@@ -416,7 +416,54 @@ function inboundSnapshot(inbound) {
   }
   const agent = readAgents().find(item => item.id === inbound.agentId); const reported = agent?.inboundStates?.find(item => item.id === inbound.id); const state = inbound.status !== 'running' ? 'stopped' : !agent ? 'error' : agentStatus(agent) === 'online' ? (reported?.status || 'starting') : agentStatus(agent);
   return { ...inbound, status: state, desiredStatus: inbound.status, lastError: state === 'error' ? (reported?.lastError || (agent?.xrayAvailable === false ? 'Agent 未检测到 Xray Core' : '远程节点启动失败')) : (reported?.lastError || ''), agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
-}function relayTraffic(runtime, direction, size) { if (direction === 'in') runtime.bytesIn += size; else runtime.bytesOut += size; }
+}function tcpReachable(host, port, timeout = 3500) {
+  return new Promise(resolve => {
+    const socket = net.connect({ host, port }); let done = false;
+    const finish = (ok, message = '') => { if (done) return; done = true; socket.destroy(); resolve({ ok, message }); };
+    socket.setTimeout(timeout); socket.once('connect', () => finish(true)); socket.once('timeout', () => finish(false, '连接超时')); socket.once('error', error => finish(false, error.code || error.message));
+  });
+}
+function splitHostPort(value) {
+  const target = String(value || '').trim(); const ipv6 = target.match(/^\[([^\]]+)\]:(\d+)$/); if (ipv6) return { host: ipv6[1], port: Number(ipv6[2]) };
+  const index = target.lastIndexOf(':'); if (index < 1) return null; const port = Number(target.slice(index + 1)); return Number.isInteger(port) && port > 0 && port < 65536 ? { host: target.slice(0, index), port } : null;
+}
+async function diagnoseInbound(inbound, repair = false) {
+  const checks = []; const add = (name, status, detail) => checks.push({ name, status, detail });
+  if (inbound.agentId) {
+    const agent = readAgents().find(item => item.id === inbound.agentId); const online = agent && agentStatus(agent) === 'online';
+    add('Agent 在线状态', online ? 'ok' : 'error', online ? `${agent.name} 已在线` : '目标 Agent 离线或不存在');
+    add('远程端口监听', 'warning', '远程 Agent 暂不支持从面板侧探测；请在该机器上检查防火墙与 Xray 日志。');
+    return { ok: online, repaired: false, checks };
+  }
+  const config = runtimeConfig(); const valid = validateRuntimeConfig(config);
+  if (!valid.ok) { add('Xray 配置校验', 'error', valid.error || '配置校验失败'); return { ok: false, repaired: false, checks }; }
+  add('Xray 配置校验', 'ok', '当前所有已启用本机入站均通过 Xray 校验');
+  let info = runtimeInfo(); let repaired = false;
+  if (repair) {
+    const result = info.running ? await syncRuntimeIfRunning() : await ensureLocalRuntime(); repaired = Boolean(result.reloaded || result.started);
+    info = runtimeInfo(); add('Core 重载', info.running ? 'ok' : 'error', info.running ? (result.reloaded ? '已重载最新配置' : '已启动 Core') : (result.error || info.lastError || 'Core 启动失败'));
+  }
+  if (!info.available) { add('Xray Core', 'error', info.error || '未检测到 Xray Core'); return { ok: false, repaired, checks }; }
+  if (!info.running) { add('Xray Core', 'error', info.lastError || 'Core 未运行，可使用“修复并诊断”尝试启动'); return { ok: false, repaired, checks }; }
+  add('Xray Core', 'ok', `正在运行，PID ${info.pid}，已加载 ${info.enabledInbounds} 个入站`);
+  const local = await tcpReachable('127.0.0.1', inbound.port); add('本机监听端口', local.ok ? 'ok' : 'error', local.ok ? `127.0.0.1:${inbound.port} 可连接` : `127.0.0.1:${inbound.port} 不可连接：${local.message}`);
+  const stream = inbound.streamSettings || {};
+  if (stream.security === 'reality') {
+    const destination = splitHostPort(stream.realitySettings?.dest);
+    if (!destination) add('Reality 伪装站点', 'error', 'Reality dest 格式无效，应为域名:端口');
+    else { const target = await tcpReachable(destination.host, destination.port); add('Reality 伪装站点', target.ok ? 'ok' : 'warning', target.ok ? `${destination.host}:${destination.port} 可从 VPS 连接` : `${destination.host}:${destination.port} 不可达：${target.message}`); }
+    const reality = stream.realitySettings || {}; if (!reality.privateKey || !reality.settings?.publicKey || !Array.isArray(reality.shortIds) || !reality.shortIds[0]) add('Reality 密钥字段', 'error', '缺少 privateKey、publicKey 或 shortId'); else add('Reality 密钥字段', 'ok', '公私钥与 shortId 已配置');
+  }
+  if (stream.security === 'tls') {
+    const certificate = stream.tlsSettings?.certificates?.[0];
+    if (!certificate?.certificateFile || !certificate?.keyFile) add('TLS 证书', 'error', '未配置证书文件；请在系统设置申请/保存证书后点击“应用至 TLS 入站”');
+    else if (!fs.existsSync(certificate.certificateFile) || !fs.existsSync(certificate.keyFile)) add('TLS 证书', 'error', '证书或私钥文件路径不存在');
+    else add('TLS 证书', 'ok', '证书与私钥文件存在');
+  }
+  add('公网防火墙', 'warning', `已确认本机监听；仍需在云安全组和系统防火墙放行 TCP ${inbound.port}`);
+  return { ok: checks.every(item => item.status !== 'error'), repaired, checks };
+}
+function relayTraffic(runtime, direction, size) { if (direction === 'in') runtime.bytesIn += size; else runtime.bytesOut += size; }
 function createTcpRelay(rule, runtime) {
   const server = net.createServer(client => {
     runtime.connections++; const upstream = net.connect({ host: rule.targetHost, port: rule.targetPort });
@@ -497,6 +544,10 @@ async function handleRelays(req, res, parts) {
   if (parts.length === 4 && parts[3] === 'qr' && req.method === 'GET' && Number.isInteger(inboundId)) {
     const inbound = readStore(inboundFile, seedInbounds, normalizeInbound).find(item => item.id === inboundId); if (!inbound) return json(res, 404, { error: 'Not found' });
     const svg = await QRCode.toString(inbound.shareLink, { type: 'svg', errorCorrectionLevel: 'M', margin: 1, width: 280, color: { dark: '#202030', light: '#ffffffff' } }); res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(svg);
+  }
+  if (parts.length === 4 && parts[3] === 'diagnose' && req.method === 'POST' && Number.isInteger(inboundId)) {
+    const inbound = readStore(inboundFile, seedInbounds, normalizeInbound).find(item => item.id === inboundId); if (!inbound) return json(res, 404, { error: 'Not found' });
+    const data = await body(req); const report = await diagnoseInbound(inbound, data.repair === true); return json(res, 200, report);
   }
   if (parts.length === 2 && req.method === 'GET') return json(res, 200, readStore(inboundFile, seedInbounds, normalizeInbound).map(inboundSnapshot));
   if (parts.length === 3 && parts[2] === 'import-3xui' && req.method === 'POST') {
@@ -743,8 +794,8 @@ async function installXray() {
   if (pathname === '/api/system/tls/apply' && req.method === 'POST') {
     if (!settings.tls.certPath || !settings.tls.keyPath || !fs.existsSync(settings.tls.certPath) || !fs.existsSync(settings.tls.keyPath)) return json(res, 400, { error: '证书文件不可用，请先保存正确路径或申请证书' });
     const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); let changed = 0;
-    for (const inbound of inbounds) if (inbound.protocolCode === 'trojan') { inbound.streamSettings.tlsSettings = { ...(inbound.streamSettings.tlsSettings || {}), certificates: [{ certificateFile: settings.tls.certPath, keyFile: settings.tls.keyPath }] }; inbound.xray.streamSettings = inbound.streamSettings; changed++; }
-    writeStore(inboundFile, inbounds); await syncRuntimeIfRunning(); return json(res, 200, { changed, message: `已将证书写入 ${changed} 个 Trojan TLS 入站。` });
+    for (const inbound of inbounds) if (inbound.streamSettings?.security === 'tls') { inbound.streamSettings.tlsSettings = { ...(inbound.streamSettings.tlsSettings || {}), certificates: [{ certificateFile: settings.tls.certPath, keyFile: settings.tls.keyPath }] }; inbound.xray.streamSettings = inbound.streamSettings; changed++; }
+    writeStore(inboundFile, inbounds); await syncRuntimeIfRunning(); return json(res, 200, { changed, message: `已将证书写入 ${changed} 个 TLS 入站（VLESS、WebSocket、gRPC 与 Trojan）。` });
   }
   return json(res, 405, { error: 'Method not allowed' });
 }

@@ -64,3 +64,8 @@ Agent 通过 systemd 服务部署。它可以接收面板下发的 Xray 安装�
 入站页面提供“导入 3x-ui 配置”入口，可粘贴 3x-ui 导出的单个入站 JSON。支持 VLESS（含 Reality、TCP、TLS、WebSocket、gRPC）、Trojan 与 Shadowsocks；导入时会保留原始 UUID、用户密码、Reality 私钥、shortId、传输层和 TLS 参数。
 
 面板启动时还会对已有入站进行非破坏性兼容迁移，补齐 Xray/3x-ui 使用的 `fallbacks`、`tcpSettings`、Reality 版本字段和 sniffing 字段，不会改写端口、UUID、密钥或用户数据。每次本机 Core 启动/重载前，都会先执行 Xray 配置校验；不通过时在系统页显示具体错误，避免写入无效配置。
+## 节点自检与修复
+
+每个本机入站卡片均提供“修复并诊断”。它会校验完整 Xray 配置、启动或重载本机 Core、确认本机监听端口，并检查 Reality 伪装站点可达性和密钥字段。TLS 入站还会确认实际证书与私钥文件是否存在。
+
+若本机端口已监听而客户端仍不可用，诊断结果会明确提示检查云安全组与系统防火墙；请放行对应的 TCP 节点端口。系统设置中的“应用至 TLS 入站”会同步证书到 VLESS TLS、WebSocket TLS、gRPC TLS 和 Trojan TLS。
