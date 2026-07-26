@@ -707,6 +707,7 @@ if (require.main === module) {
   server.listen(port, panelHost, () => {
     console.log('3xUI Lite HTTP: http://' + panelHost + ':' + port);
     for (const relay of readStore(relayFile, seedRelays, normalizeRelay)) if (relay.status === 'running' && relay.listenPort && !relay.agentId) startRelay(relay).catch(error => console.error(`Relay ${relay.name} failed: ${error.message}`));
+    if (runtimeConfig().inbounds.length) { const started = startRuntime(); if (started.error) { runtime.lastError = started.error; console.error(`Xray startup failed: ${started.error}`); } }
   });
   const bootTls = readSettings().tls;
   if (bootTls.certPath && bootTls.keyPath && fs.existsSync(bootTls.certPath) && fs.existsSync(bootTls.keyPath)) {
