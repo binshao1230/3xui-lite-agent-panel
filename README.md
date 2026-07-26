@@ -51,7 +51,7 @@ sudo bash ./deploy-linux.sh
 
 ## Agent 运行要求
 
-Agent 通过 systemd 服务部署。它可以接收面板下发的 Xray 安装、节点配置及中转规则。Agent 端自动安装 Xray 当前支持 Linux x64、arm64 和 arm 架构。
+Agent 通过 systemd 服务部署。它可以接收面板下发的 Xray 安装、节点配置及中转规则。Agent 端自动安装 Xray 当前支持 Linux x64、arm64 和 arm 架构。面板本机也支持从系统页面安装官方 Xray Core；版本可填写 `v26.3.27`、`26.3.27`，或留空安装最新版。
 
 ## 安全建议
 

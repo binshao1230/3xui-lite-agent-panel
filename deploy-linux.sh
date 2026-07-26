@@ -36,10 +36,20 @@ install_node() {
   fi
 }
 
+ensure_unzip() {
+  if command_exists unzip; then return; fi
+  echo "正在安装 unzip..."
+  if command_exists apt-get; then apt-get update; apt-get install -y unzip;
+  elif command_exists dnf; then dnf install -y unzip;
+  elif command_exists yum; then yum install -y unzip;
+  elif command_exists apk; then apk add --no-cache unzip;
+  else echo "未找到受支持的软件包管理器，请手动安装 unzip 后重试。"; exit 1; fi
+}
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="${APP_DIR:-/opt/3xui-lite-agent-panel}"
 SERVICE_NAME="${SERVICE_NAME:-3xui-lite-agent-panel}"
 install_node
+ensure_unzip
 NODE_BIN="${NODE_BIN:-$(command -v node)}"
 NODE_MAJOR="$(${NODE_BIN} -p "process.versions.node.split('.')[0]")"
 if [[ "${NODE_MAJOR}" -lt 18 ]]; then

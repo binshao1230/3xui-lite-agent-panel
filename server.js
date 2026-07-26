@@ -586,28 +586,39 @@ async function detectPublicAddress(force = false) {
     }).on('error', reject);
   });
 }
+function xrayReleaseAsset() {
+  if (process.platform === 'win32' && process.arch === 'x64') return { archive: 'Xray-windows-64.zip', binary: 'xray.exe' };
+  if (process.platform === 'linux' && process.arch === 'x64') return { archive: 'Xray-linux-64.zip', binary: 'xray' };
+  if (process.platform === 'linux' && process.arch === 'arm64') return { archive: 'Xray-linux-arm64-v8a.zip', binary: 'xray' };
+  if (process.platform === 'linux' && process.arch === 'arm') return { archive: 'Xray-linux-arm32-v7a.zip', binary: 'xray' };
+  return null;
+}
 async function installXray() {
   if (runtime.installing) return { error: 'Xray Core 正在安装中' };
   if (runtime.child && runtime.child.exitCode === null && !runtime.child.killed) return { error: '请先停止正在运行的 Xray Core' };
-  const requestedVersion = cleanText(arguments[0], '', 80);
-  if (requestedVersion && !/^v[0-9]+(?:\\.[0-9]+){1,3}(?:[-._a-zA-Z0-9]+)?$/.test(requestedVersion)) return { error: '版本格式无效，请使用官方标签，例如 v26.3.27' };
-  if (process.platform !== 'win32' || process.arch !== 'x64') return { error: '当前内置安装器仅支持 Windows x64；请手动设置 XRAY_BIN。' };
+  const rawVersion = cleanText(arguments[0], '', 80); const requestedVersion = rawVersion && !rawVersion.startsWith('v') ? `v${rawVersion}` : rawVersion;
+  if (requestedVersion && !/^v[0-9]+(?:\.[0-9]+){1,3}(?:[-._a-zA-Z0-9]+)?$/.test(requestedVersion)) return { error: '版本格式无效，请使用官方标签，例如 v26.3.27' };
+  const targetAsset = xrayReleaseAsset(); if (!targetAsset) return { error: `当前系统不支持内置安装：${process.platform} ${process.arch}` };
   runtime.installing = true; runtime.lastError = '';
   const temp = fs.mkdtempSync(path.join(root, '.xray-install-'));
   try {
     const releaseUrl = requestedVersion ? `https://api.github.com/repos/XTLS/Xray-core/releases/tags/${encodeURIComponent(requestedVersion)}` : 'https://api.github.com/repos/XTLS/Xray-core/releases/latest';
     const release = JSON.parse((await requestBuffer(releaseUrl)).toString('utf8'));
-    const asset = release.assets?.find(item => item.name === 'Xray-windows-64.zip'); const digest = release.assets?.find(item => item.name === 'Xray-windows-64.zip.dgst');
-    if (!asset || !digest) throw new Error('官方发布页未找到 Windows x64 安装包或校验文件');
-    const zip = await requestBuffer(asset.browser_download_url); const digestText = (await requestBuffer(digest.browser_download_url)).toString('utf8'); const expected = digestText.match(/SHA2-256\\s*=\\s*([a-fA-F0-9]{64})/)?.[1]?.toLowerCase(); const actual = crypto.createHash('sha256').update(zip).digest('hex');
+    const asset = release.assets?.find(item => item.name === targetAsset.archive); const digest = release.assets?.find(item => item.name === `${targetAsset.archive}.dgst`);
+    if (!asset || !digest) throw new Error(`官方发布页未找到 ${targetAsset.archive} 或其 SHA-256 校验文件`);
+    const zip = await requestBuffer(asset.browser_download_url); const digestText = (await requestBuffer(digest.browser_download_url)).toString('utf8'); const expected = digestText.match(/SHA2-256\s*=\s*([a-fA-F0-9]{64})/)?.[1]?.toLowerCase(); const actual = crypto.createHash('sha256').update(zip).digest('hex');
     if (!expected || expected !== actual) throw new Error('安装包 SHA-256 校验失败，已拒绝安装');
     const zipFile = path.join(temp, 'xray.zip'); const out = path.join(temp, 'out'); fs.writeFileSync(zipFile, zip); fs.mkdirSync(out);
-    const unpack = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force', zipFile, out], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    const unpack = process.platform === 'win32'
+      ? spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force', zipFile, out], { encoding: 'utf8', windowsHide: true, timeout: 60000 })
+      : spawnSync('unzip', ['-oq', zipFile, '-d', out], { encoding: 'utf8', windowsHide: true, timeout: 60000 });
+    if (unpack.error?.code === 'ENOENT') throw new Error(process.platform === 'win32' ? '未找到 PowerShell，无法解压 Xray 安装包' : '未找到 unzip；请运行面板更新脚本安装依赖后重试');
     if (unpack.status !== 0) throw new Error(`解压失败：${(unpack.stderr || unpack.stdout || '未知错误').slice(0, 300)}`);
-    const source = path.join(out, 'xray.exe'); if (!fs.existsSync(source)) throw new Error('安装包中未找到 xray.exe');
-    const verify = spawnSync(source, ['version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 }); if (verify.status !== 0) throw new Error('xray.exe 校验失败');
+    const source = path.join(out, targetAsset.binary); if (!fs.existsSync(source)) throw new Error(`安装包中未找到 ${targetAsset.binary}`);
+    if (process.platform !== 'win32') fs.chmodSync(source, 0o755);
+    const verify = spawnSync(source, ['version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 }); if (verify.status !== 0) throw new Error(`${targetAsset.binary} 校验失败`);
     const target = path.join(root, 'runtime'); fs.mkdirSync(target, { recursive: true });
-    for (const name of ['xray.exe', 'geoip.dat', 'geosite.dat']) { const from = path.join(out, name); if (fs.existsSync(from)) fs.copyFileSync(from, path.join(target, name)); }
+    for (const name of [targetAsset.binary, 'geoip.dat', 'geosite.dat']) { const from = path.join(out, name); if (fs.existsSync(from)) { const destination = path.join(target, name); fs.copyFileSync(from, destination); if (name === targetAsset.binary && process.platform !== 'win32') fs.chmodSync(destination, 0o755); } }
     runtime.lastLog = `已安装 Xray Core ${release.tag_name || ''}`; return { info: runtimeInfo(), version: release.tag_name || '' };
   } catch (error) { runtime.lastError = error.message || 'Xray Core 安装失败'; return { error: runtime.lastError }; }
   finally { runtime.installing = false; fs.rmSync(temp, { recursive: true, force: true }); }
