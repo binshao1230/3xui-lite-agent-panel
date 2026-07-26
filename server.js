@@ -692,6 +692,14 @@ function tlsPublic(settings) {
   return { ...tls, ready: hasFiles, restartRequired: hasFiles };
 }
 function certbotExists() { return spawnSync(process.platform === 'win32' ? 'where' : 'which', ['certbot'], { encoding: 'utf8' }).status === 0; }
+function certificateRequestError(result, domain) {
+  const raw = String(result?.stderr || result?.stdout || result?.error?.message || '未知错误').replace(/\s+/g, ' ').trim().slice(0, 600);
+  let hint = `Let's Encrypt HTTP-01 验证失败。请确认：1) ${domain} 的 A/AAAA 记录已指向这台 VPS；2) 云安全组和系统防火墙已放行 TCP 80；3) 80 端口未被 Nginx、Apache 或其他程序占用。`;
+  if (/address already in use|could not bind|bind to port 80/i.test(raw)) hint += ' 当前提示表明 80 端口可能被占用；请停止占用程序后重试，或改用已正确配置 challenge 路径的反向代理。';
+  else if (/timeout|connection refused|no route|challenge failed/i.test(raw)) hint += ' 验证服务器无法从公网访问该域名的 80 端口；请检查 DNS 生效、云防火墙和运营商端口限制。';
+  else if (/unauthorized|invalid response|not found/i.test(raw)) hint += ' 验证响应不正确；请检查域名解析是否指向当前服务器，以及是否有 CDN/反向代理改写了 HTTP 请求。';
+  return `${hint}\n\ncertbot 摘要：${raw}`;
+}
 function xrayCommand() { const local = path.join(root, 'runtime', process.platform === 'win32' ? 'xray.exe' : 'xray'); return fs.existsSync(local) ? local : cleanText(process.env.XRAY_BIN, process.platform === 'win32' ? 'xray.exe' : 'xray', 512); }
 function xrayProbe() {
   const binary = xrayCommand(); const result = spawnSync(binary, ['version'], { encoding: 'utf8', timeout: 5000, windowsHide: true });
@@ -840,8 +848,8 @@ async function installXray() {
     const data = await body(req); const domain = cleanText(data.domain, '', 253).toLowerCase(); const email = cleanText(data.email, '', 100);
     if (!domainValid(domain) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, 400, { error: '请填写有效域名和通知邮箱' });
     if (!certbotExists()) return json(res, 409, { error: '未检测到 certbot。请在服务器安装 certbot 后重试：apt install certbot（Debian/Ubuntu）。' });
-    const result = spawnSync('certbot', ['certonly', '--webroot', '-w', root, '-d', domain, '--email', email, '--agree-tos', '--non-interactive', '--keep-until-expiring'], { encoding: 'utf8', timeout: 180000 });
-    if (result.error || result.status !== 0) return json(res, 422, { error: `证书申请失败：${(result.stderr || result.stdout || result.error?.message || '未知错误').slice(0, 800)}` });
+    const result = spawnSync('certbot', ['certonly', '--standalone', '--preferred-challenges', 'http', '--http-01-port', '80', '-d', domain, '--email', email, '--agree-tos', '--non-interactive', '--keep-until-expiring'], { encoding: 'utf8', timeout: 180000 });
+    if (result.error || result.status !== 0) return json(res, 422, { error: certificateRequestError(result, domain) });
     settings.tls = { domain, email, certPath: `/etc/letsencrypt/live/${domain}/fullchain.pem`, keyPath: `/etc/letsencrypt/live/${domain}/privkey.pem`, updatedAt: new Date().toISOString() }; writeSettings(settings);
     return json(res, 200, { tls: tlsPublic(settings), message: '证书已申请。请应用到 TLS 入站并重启面板 HTTPS 服务。' });
   }
@@ -894,7 +902,7 @@ if (require.main === module) {
     https.createServer({ cert: fs.readFileSync(bootTls.certPath), key: fs.readFileSync(bootTls.keyPath) }, requestHandler).listen(httpsPort, panelHost, () => console.log(`3xUI Lite HTTPS: https://${panelHost}:${httpsPort}`));
   }
 }
-module.exports = { server, buildNode, import3xuiInbound, createUser, normalizeExpire, userExpired, inboundTlsError, agentInstallScript, readSettings };
+module.exports = { server, buildNode, import3xuiInbound, createUser, normalizeExpire, userExpired, inboundTlsError, agentInstallScript, readSettings, certificateRequestError };
 
 
 
