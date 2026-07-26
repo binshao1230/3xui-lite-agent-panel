@@ -9,7 +9,7 @@ const dgram = require('node:dgram');
 const http = require('node:http');
 const https = require('node:https');
 
-const AGENT_VERSION = '0.5.2';
+const AGENT_VERSION = '0.5.3';
 function option(name, fallback = '') { const index = process.argv.indexOf(`--${name}`); return index >= 0 ? (process.argv[index + 1] || '') : (process.env[`AGENT_${name.toUpperCase()}`] || fallback); }
 const controller = option('controller').replace(/\/$/, '');
 const agentStartedAt = new Date().toISOString();
@@ -47,6 +47,7 @@ async function syncInbounds(tasks) {
 const stateFile = path.join(path.dirname(__filename), '.3xui-lite-agent-state.json');
 function readAgentState() { try { const state = JSON.parse(fs.readFileSync(stateFile, 'utf8')); return state && typeof state === 'object' ? state : {}; } catch { return {}; } }
 const agentState = readAgentState();
+if (agentState.xrayInstalling === true) { agentState.xrayInstalling = false; agentState.xrayInstallError = '检测到上次 Xray 安装被中断，已允许重新下发安装任务'; saveAgentState(); }
 function saveAgentState() { try { fs.writeFileSync(stateFile, JSON.stringify(agentState), { mode: 0o600 }); } catch (error) { console.error(`[agent] unable to save local state: ${error.message}`); } }
 function downloadText(urlText, redirects = 0) {
   if (redirects > 3) return Promise.reject(new Error('too many update redirects'));
