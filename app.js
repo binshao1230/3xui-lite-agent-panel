@@ -122,7 +122,7 @@ function populateTrafficOptions() {
   const network = systemInfo.network || {}; $('#publicAddress').textContent = network.publicAddress || '未识别'; $('#publicAddressDetail').textContent = network.publicAddress ? `来源：${network.source} · ${network.checkedAt ? new Date(network.checkedAt).toLocaleString('zh-CN') : ''}` : (network.checking ? '正在检测 VPS 公网地址…' : (network.error || '可在此重新检测，或设置环境变量 PUBLIC_ADDRESS。')); $('#detectAddress').disabled = Boolean(network.checking);
   if (!$('#coreVersion').value && runtime.installedVersion) $('#coreVersion').placeholder = `当前 ${runtime.installedVersion}；留空安装最新`;
   $('#installCore').disabled = runtime.installing || runtime.running; $('#installCore').textContent = runtime.installing ? '正在安装…' : runtime.available ? '切换 / 更新 Core' : '一键安装 Core';
-  $('#startRuntime').disabled = !runtime.available || runtime.running || !runtime.enabledInbounds; $('#stopRuntime').disabled = !runtime.running;
+  $('#startRuntime').disabled = !runtime.available || runtime.running; $('#startRuntime').title = runtime.enabledInbounds ? '' : '当前没有启用的入站；仍可先启动 Core，新增入站后会自动重载。'; $('#stopRuntime').disabled = !runtime.running;
 }
 async function load() {
   try {

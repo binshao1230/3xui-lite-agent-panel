@@ -529,7 +529,7 @@ function appendRuntimeLog(value) { runtime.lastLog = `${runtime.lastLog}${String
 function startRuntime() {
   const probe = xrayProbe(); if (!probe.available) return { error: probe.error };
   if (runtime.child && runtime.child.exitCode === null && !runtime.child.killed) return { info: runtimeInfo() };
-  const config = runtimeConfig(); if (!config.inbounds.length) return { error: '没有已启用的入站配置，无法启动 Xray' };
+  const config = runtimeConfig();
   writeStore(runtimeFile, config); runtime.lastError = ''; runtime.lastLog = '';
   const child = spawn(probe.binary, ['run', '-c', runtimeFile], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); runtime.child = child; runtime.startedAt = new Date().toISOString();
   child.stdout.on('data', appendRuntimeLog); child.stderr.on('data', appendRuntimeLog);
