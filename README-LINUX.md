@@ -24,6 +24,16 @@ sudo systemctl status 3xui-lite-agent-panel
 sudo journalctl -u 3xui-lite-agent-panel -f
 ```
 
+## 外网访问检查
+
+面板默认监听 `0.0.0.0:3000`。若服务器本机访问正常而浏览器超时，请在云平台安全组中放行 TCP `3000` 端口，并检查系统防火墙。可执行：
+
+```bash
+sudo ss -lntp | grep :3000
+curl http://127.0.0.1:3000/api/health
+sudo ufw allow 3000/tcp  # 使用 UFW 时
+```
+
 安装时设置其他端口：
 
 ```bash

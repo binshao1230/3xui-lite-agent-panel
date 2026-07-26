@@ -25,6 +25,22 @@ curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/m
 
 初始账号密码为 `admin / admin`。首次登录后请立即修改密码。
 
+## 无法从外网访问时
+
+面板默认显式监听 `0.0.0.0:3000`。如果本机服务正常但浏览器访问超时，请检查云平台安全组和系统防火墙：
+
+```bash
+sudo ss -lntp | grep :3000
+curl http://127.0.0.1:3000/api/health
+```
+
+在腾讯云、阿里云、AWS 等云平台的安全组/防火墙中，添加一条入站规则：`TCP`、端口 `3000`、来源按实际管理 IP 限制（测试时可临时使用 `0.0.0.0/0`）。若系统使用 UFW：
+
+```bash
+sudo ufw allow 3000/tcp
+sudo ufw status
+```
+
 ## 离线部署包
 
 `release/3xui-lite-linux.tar.gz` 包含同一份可部署源码。解压后运行：

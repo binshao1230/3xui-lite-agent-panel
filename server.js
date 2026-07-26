@@ -644,14 +644,15 @@ async function requestHandler(req, res) {
 }
 const server = http.createServer(requestHandler);
 if (require.main === module) {
-  server.listen(port, () => {
-    console.log(`3xUI Lite HTTP: http://localhost:${port}`);
+  const panelHost = process.env.PANEL_HOST || '0.0.0.0';
+  server.listen(port, panelHost, () => {
+    console.log('3xUI Lite HTTP: http://' + panelHost + ':' + port);
     for (const relay of readStore(relayFile, seedRelays, normalizeRelay)) if (relay.status === 'running' && relay.listenPort && !relay.agentId) startRelay(relay).catch(error => console.error(`Relay ${relay.name} failed: ${error.message}`));
   });
   const bootTls = readSettings().tls;
   if (bootTls.certPath && bootTls.keyPath && fs.existsSync(bootTls.certPath) && fs.existsSync(bootTls.keyPath)) {
     const httpsPort = Number(process.env.HTTPS_PORT || 3443);
-    https.createServer({ cert: fs.readFileSync(bootTls.certPath), key: fs.readFileSync(bootTls.keyPath) }, requestHandler).listen(httpsPort, () => console.log(`3xUI Lite HTTPS: https://localhost:${httpsPort}`));
+    https.createServer({ cert: fs.readFileSync(bootTls.certPath), key: fs.readFileSync(bootTls.keyPath) }, requestHandler).listen(httpsPort, panelHost, () => console.log(`3xUI Lite HTTPS: https://${panelHost}:${httpsPort}`));
   }
 }
 module.exports = { server, buildNode, createUser, readSettings };
