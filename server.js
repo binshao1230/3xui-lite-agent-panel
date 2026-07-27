@@ -563,8 +563,11 @@ function stopRelay(id) { const runtime = relayRuntimes.get(id); if (!runtime) re
 function createRelay(data) {
   const agentId = cleanText(data.agentId, '', 80); const listenPort = Number(data.listenPort); const targetPort = Number(data.targetPort); const transport = cleanText(data.transport, 'tcp', 16);
   if (!validText(data.name) || !validText(data.targetHost) || !Number.isInteger(listenPort) || listenPort < 1 || listenPort > 65535 || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535 || !['tcp', 'udp', 'tcp+udp'].includes(transport)) return null;
-  return { id: id(), name: data.name.trim(), transport, listenPort, bindAddress: cleanText(data.bindAddress, '0.0.0.0', 80), agentId, targetHost: data.targetHost.trim(), targetPort, entry: cleanText(data.entry, '本机入口', 80), exit: cleanText(data.exit, '目标服务', 80), status: 'running', runtimeStatus: 'stopped', lastError: '', bytesIn: 0, bytesOut: 0, connections: 0, createdAt: new Date().toISOString() };
-}async function handleAuth(req, res, pathname) {
+  return { id: id(), name: data.name.trim(), transport, listenPort, bindAddress: cleanText(data.bindAddress, '0.0.0.0', 80), agentId, targetHost: data.targetHost.trim(), targetPort, entry: cleanText(data.entry, '入口端口', 80), exit: cleanText(data.exit, '目标服务', 80), status: 'running', runtimeStatus: 'stopped', lastError: '', bytesIn: 0, bytesOut: 0, connections: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+}
+function updateRelay(existing, data) { const candidate = createRelay({ ...existing, ...data }); return candidate ? { ...candidate, id: existing.id, status: existing.status, createdAt: existing.createdAt, updatedAt: new Date().toISOString() } : null; }
+function relayPortConflict(relays, candidate, ignoredId = null) { const usesTcp = mode => mode === 'tcp' || mode === 'tcp+udp'; const usesUdp = mode => mode === 'udp' || mode === 'tcp+udp'; return relays.some(item => item.id !== ignoredId && (item.agentId || '') === candidate.agentId && item.listenPort === candidate.listenPort && ((usesTcp(item.transport) && usesTcp(candidate.transport)) || (usesUdp(item.transport) && usesUdp(candidate.transport)))); }
+async function activateRelayRule(relay) { if (relay.agentId) { relay.runtimeStatus = 'starting'; relay.lastError = ''; return; } try { const snapshot = await startRelay(relay); Object.assign(relay, snapshot, { status: 'running', lastError: '' }); } catch (error) { relay.status = 'stopped'; relay.runtimeStatus = 'error'; relay.lastError = error.message || '监听端口失败'; } }async function handleAuth(req, res, pathname) {
   if (pathname === '/api/auth/me' && req.method === 'GET') {
     const session = currentSession(req); const settings = readSettings();
     return json(res, 200, { authenticated: Boolean(session), username: session?.username || '', mustChangePassword: Boolean(session && settings.admin.mustChangePassword) });
@@ -589,25 +592,40 @@ function createRelay(data) {
   }
   return false;
 }
+async function diagnoseRelay(relay) {
+  const checks = []; const add = (name, status, detail) => checks.push({ name, status, detail }); const state = relaySnapshot(relay);
+  add('规则配置', relay.listenPort && relay.targetHost && relay.targetPort ? 'ok' : 'error', relay.listenPort ? `${relay.transport.toUpperCase()} ${relay.bindAddress}:${relay.listenPort} → ${relay.targetHost}:${relay.targetPort}` : '规则缺少监听端口或目标地址');
+  if (relay.agentId) {
+    const agent = readAgents().find(item => item.id === relay.agentId); const online = agent && agentStatus(agent) === 'online';
+    add('执行 Agent', online ? 'ok' : 'error', online ? `${agent.name} 在线，最近心跳 ${agent.lastSeenAt}` : 'Agent 离线、已停用或不存在');
+    add('远程规则状态', state.runtimeStatus === 'running' ? 'ok' : (state.runtimeStatus === 'starting' ? 'warning' : 'error'), state.runtimeStatus === 'running' ? 'Agent 已确认监听' : (state.lastError || '等待 Agent 下次心跳确认'));
+    add('网络放行', 'warning', `请在 ${agent?.name || '目标 Agent'} 的云安全组和防火墙放行 ${relay.transport.toUpperCase()} ${relay.listenPort}`);
+    return { ok: checks.every(item => item.status !== 'error'), checks };
+  }
+  const running = state.runtimeStatus === 'running'; add('本机监听', running ? 'ok' : 'error', running ? `${relay.bindAddress}:${relay.listenPort} 已由面板接管` : (state.lastError || '规则未运行'));
+  if (relay.transport === 'tcp' || relay.transport === 'tcp+udp') { const target = await tcpReachable(relay.targetHost, relay.targetPort); add('目标 TCP 可达性', target.ok ? 'ok' : 'warning', target.ok ? `${relay.targetHost}:${relay.targetPort} 可连接` : `${relay.targetHost}:${relay.targetPort} 不可连接：${target.message}`); }
+  if (relay.transport === 'udp' || relay.transport === 'tcp+udp') add('UDP 目标检查', 'warning', 'UDP 无通用握手，已确认规则已监听；请结合业务端协议或客户端请求验证回包。');
+  add('网络放行', 'warning', `请在云安全组和系统防火墙放行 ${relay.transport.toUpperCase()} ${relay.listenPort}`);
+  return { ok: checks.every(item => item.status !== 'error'), checks };
+}
 async function handleRelays(req, res, parts) {
   const relayId = Number(parts[2]);
   if (parts.length === 2 && req.method === 'GET') return json(res, 200, readStore(relayFile, seedRelays, normalizeRelay).map(relaySnapshot));
   if (parts.length === 2 && req.method === 'POST') {
-    const relay = createRelay(await body(req)); if (!relay) return json(res, 400, { error: '请填写规则名称、协议、监听端口与目标地址' });
-    const agents = readAgents(); if (relay.agentId && !agents.some(agent => agent.id === relay.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' });
-    const relays = readStore(relayFile, seedRelays, normalizeRelay); const usesTcp = mode => mode === 'tcp' || mode === 'tcp+udp'; const usesUdp = mode => mode === 'udp' || mode === 'tcp+udp'; const overlaps = item => (item.agentId || '') === relay.agentId && item.listenPort === relay.listenPort && ((usesTcp(item.transport) && usesTcp(relay.transport)) || (usesUdp(item.transport) && usesUdp(relay.transport)));
-    if (relays.some(overlaps)) return json(res, 409, { error: '该中转节点上监听端口与现有规则的传输协议冲突' });
-    relays.unshift(relay);
-    if (relay.agentId) { relay.runtimeStatus = 'starting'; } else { try { const snapshot = await startRelay(relay); Object.assign(relay, snapshot); } catch (error) { relay.status = 'stopped'; relay.runtimeStatus = 'error'; relay.lastError = error.message; } }
-    writeStore(relayFile, relays); return json(res, 201, relaySnapshot(relay));
+    const relay = createRelay(await body(req)); if (!relay) return json(res, 400, { error: '请填写规则名称、协议、监听端口与目标地址' }); const agents = readAgents();
+    if (relay.agentId && !agents.some(agent => agent.id === relay.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const relays = readStore(relayFile, seedRelays, normalizeRelay);
+    if (relayPortConflict(relays, relay)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' }); relays.unshift(relay); await activateRelayRule(relay); writeStore(relayFile, relays); return json(res, 201, relaySnapshot(relay));
   }
   if (!Number.isInteger(relayId)) return json(res, 404, { error: 'Not found' });
+  if (parts.length === 4 && parts[3] === 'diagnose' && req.method === 'POST') { const relay = readStore(relayFile, seedRelays, normalizeRelay).find(item => item.id === relayId); if (!relay) return json(res, 404, { error: 'Not found' }); return json(res, 200, await diagnoseRelay(relay)); }
   if (req.method === 'PATCH') {
-    const data = await body(req); if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' }); const relays = readStore(relayFile, seedRelays, normalizeRelay); const relay = relays.find(item => item.id === relayId); if (!relay) return json(res, 404, { error: 'Not found' });
-    if (relay.agentId) { relay.status = data.status; relay.runtimeStatus = data.status === 'running' ? 'starting' : 'stopped'; relay.lastError = ''; } else if (data.status === 'running') { try { const snapshot = await startRelay(relay); Object.assign(relay, snapshot, { status: 'running', lastError: '' }); } catch (error) { relay.status = 'stopped'; relay.runtimeStatus = 'error'; relay.lastError = error.message; } } else { stopRelay(relay.id); relay.status = 'stopped'; relay.runtimeStatus = 'stopped'; }
-    writeStore(relayFile, relays); return json(res, 200, relaySnapshot(relay));
+    const data = await body(req); const relays = readStore(relayFile, seedRelays, normalizeRelay); const index = relays.findIndex(item => item.id === relayId); if (index < 0) return json(res, 404, { error: 'Not found' }); const relay = relays[index];
+    if (Object.keys(data).length === 1 && Object.prototype.hasOwnProperty.call(data, 'status')) { if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' }); relay.status = data.status; relay.updatedAt = new Date().toISOString(); if (relay.agentId) { relay.runtimeStatus = data.status === 'running' ? 'starting' : 'stopped'; relay.lastError = ''; } else if (data.status === 'running') await activateRelayRule(relay); else { stopRelay(relay.id); relay.runtimeStatus = 'stopped'; relay.lastError = ''; } writeStore(relayFile, relays); return json(res, 200, relaySnapshot(relay)); }
+    const updated = updateRelay(relay, data); if (!updated) return json(res, 400, { error: '规则名称、协议、监听端口与目标地址必须有效' }); const agents = readAgents();
+    if (updated.agentId && !agents.some(agent => agent.id === updated.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); if (relayPortConflict(relays, updated, relayId)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' });
+    if (!relay.agentId) stopRelay(relay.id); relays[index] = updated; if (updated.status === 'running') await activateRelayRule(updated); writeStore(relayFile, relays); return json(res, 200, relaySnapshot(updated));
   }
-  if (req.method === 'DELETE') { const relays = readStore(relayFile, seedRelays, normalizeRelay); if (!relays.some(item => item.id === relayId)) return json(res, 404, { error: 'Not found' }); stopRelay(relayId); writeStore(relayFile, relays.filter(item => item.id !== relayId)); return json(res, 204); }
+  if (req.method === 'DELETE') { const relays = readStore(relayFile, seedRelays, normalizeRelay); const relay = relays.find(item => item.id === relayId); if (!relay) return json(res, 404, { error: 'Not found' }); if (!relay.agentId) stopRelay(relayId); writeStore(relayFile, relays.filter(item => item.id !== relayId)); return json(res, 204); }
   return json(res, 405, { error: 'Method not allowed' });
 }async function handleInbounds(req, res, parts) {
   const inboundId = Number(parts[2]);
