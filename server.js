@@ -104,23 +104,32 @@ function json(res, code, payload, headers = {}) {
   res.writeHead(code, { ...securityHeaders, 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers });
   res.end(code === 204 ? '' : JSON.stringify(payload));
 }
+function requestError(message, statusCode) { const error = new Error(message); error.statusCode = statusCode; return error; }
 function body(req) {
   return new Promise((resolve, reject) => {
-    let raw = '';
-    req.on('data', chunk => { raw += chunk; if (raw.length > 1e6) req.destroy(); });
-    req.on('end', () => { try { resolve(raw ? JSON.parse(raw) : {}); } catch { reject(new Error('Invalid JSON')); } });
-    req.on('error', reject);
+    let raw = ''; let size = 0; let settled = false;
+    const fail = error => { if (!settled) { settled = true; reject(error); } };
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > 1024 * 1024) { fail(requestError('请求内容过大', 413)); req.resume(); return; }
+      if (!settled) raw += chunk;
+    });
+    req.on('end', () => {
+      if (settled) return;
+      try { const parsed = raw ? JSON.parse(raw) : {}; settled = true; resolve(parsed); }
+      catch { fail(requestError('请求 JSON 格式无效', 400)); }
+    });
+    req.on('error', error => fail(error));
   });
 }
 function validText(value, max = 128) { return typeof value === 'string' && value.trim().length > 0 && value.length <= max; }
 function cleanText(value, fallback = '', max = 128) { return validText(value, max) ? value.trim() : fallback; }
 function parseCookies(req) {
   return Object.fromEntries((req.headers.cookie || '').split(';').map(item => item.trim()).filter(Boolean).map(item => {
-    const index = item.indexOf('=');
-    return index < 0 ? [item, ''] : [item.slice(0, index), decodeURIComponent(item.slice(index + 1))];
+    const index = item.indexOf('='); const name = index < 0 ? item : item.slice(0, index); const encoded = index < 0 ? '' : item.slice(index + 1);
+    try { return [name, decodeURIComponent(encoded)]; } catch { return [name, '']; }
   }));
-}
-function currentSession(req) {
+}function currentSession(req) {
   const value = parseCookies(req).session;
   const session = value && sessions.get(value);
   if (!session || session.expiresAt < Date.now()) { if (value) sessions.delete(value); return null; }
@@ -525,24 +534,32 @@ function createTcpRelay(rule, runtime) {
   });
   runtime.servers.push(server); return new Promise((resolve, reject) => { const fail = error => reject(error); server.once('error', fail); server.listen(rule.listenPort, rule.bindAddress, () => { server.removeListener('error', fail); server.on('error', error => { runtime.status = 'error'; runtime.lastError = error.message; }); resolve(); }); });
 }
+function closeUdpClients(clients) {
+  for (const entry of clients.values()) { if (entry?.timer) clearTimeout(entry.timer); try { (entry?.socket || entry).close(); } catch {} }
+  clients.clear();
+}
 function createUdpRelay(rule, runtime) {
-  const server = dgram.createSocket('udp4'); const clients = new Map(); runtime.servers.push(server); runtime.udpClients = clients;
+  const server = dgram.createSocket('udp4'); const clients = new Map(); const idleMs = 2 * 60 * 1000; runtime.servers.push(server); runtime.udpClients = clients;
   server.on('message', (message, remote) => {
-    relayTraffic(runtime, 'in', message.length); const key = `${remote.address}:${remote.port}`; let upstream = clients.get(key);
-    if (!upstream) { upstream = dgram.createSocket('udp4'); upstream.on('message', reply => { relayTraffic(runtime, 'out', reply.length); server.send(reply, remote.port, remote.address); }); upstream.on('error', error => { runtime.lastError = error.message; }); clients.set(key, upstream); }
-    upstream.send(message, rule.targetPort, rule.targetHost);
+    relayTraffic(runtime, 'in', message.length); const key = `${remote.address}:${remote.port}`; let entry = clients.get(key);
+    if (!entry) {
+      const socket = dgram.createSocket('udp4'); entry = { socket, timer: null };
+      const closeEntry = () => { if (entry.timer) clearTimeout(entry.timer); if (clients.get(key) === entry) clients.delete(key); try { socket.close(); } catch {} };
+      const refresh = () => { if (entry.timer) clearTimeout(entry.timer); entry.timer = setTimeout(closeEntry, idleMs); entry.timer.unref?.(); };
+      entry.refresh = refresh; socket.on('message', reply => { relayTraffic(runtime, 'out', reply.length); server.send(reply, remote.port, remote.address); refresh(); }); socket.on('error', error => { runtime.lastError = error.message; closeEntry(); }); clients.set(key, entry);
+    }
+    entry.refresh(); entry.socket.send(message, rule.targetPort, rule.targetHost);
   });
   return new Promise((resolve, reject) => { const fail = error => reject(error); server.once('error', fail); server.bind(rule.listenPort, rule.bindAddress, () => { server.removeListener('error', fail); server.on('error', error => { runtime.status = 'error'; runtime.lastError = error.message; }); resolve(); }); });
-}
-async function startRelay(rule) {
+}async function startRelay(rule) {
   if (!Number.isInteger(rule.listenPort) || !validText(rule.targetHost) || !Number.isInteger(rule.targetPort)) throw new Error('请填写有效监听端口、目标地址和目标端口');
   if (readStore(inboundFile, seedInbounds, normalizeInbound).some(inbound => !inbound.agentId && inbound.status === 'running' && inbound.port === rule.listenPort)) throw new Error('监听端口与本机已启用入站冲突');
   if (relayRuntimes.has(rule.id)) return relaySnapshot(rule);
   const runtime = { status: 'starting', servers: [], udpClients: new Map(), bytesIn: 0, bytesOut: 0, connections: 0, lastError: '' }; relayRuntimes.set(rule.id, runtime);
   try { if (rule.transport === 'tcp' || rule.transport === 'tcp+udp') await createTcpRelay(rule, runtime); if (rule.transport === 'udp' || rule.transport === 'tcp+udp') await createUdpRelay(rule, runtime); runtime.status = 'running'; return relaySnapshot(rule); }
-  catch (error) { for (const server of runtime.servers) try { server.close(); } catch {} for (const client of runtime.udpClients.values()) try { client.close(); } catch {} relayRuntimes.delete(rule.id); throw error; }
+  catch (error) { for (const server of runtime.servers) try { server.close(); } catch {} closeUdpClients(runtime.udpClients); relayRuntimes.delete(rule.id); throw error; }
 }
-function stopRelay(id) { const runtime = relayRuntimes.get(id); if (!runtime) return; for (const server of runtime.servers) try { server.close(); } catch {} for (const client of runtime.udpClients.values()) try { client.close(); } catch {} relayRuntimes.delete(id); }
+function stopRelay(id) { const runtime = relayRuntimes.get(id); if (!runtime) return; for (const server of runtime.servers) try { server.close(); } catch {} closeUdpClients(runtime.udpClients); relayRuntimes.delete(id); }
 function createRelay(data) {
   const agentId = cleanText(data.agentId, '', 80); const listenPort = Number(data.listenPort); const targetPort = Number(data.targetPort); const transport = cleanText(data.transport, 'tcp', 16);
   if (!validText(data.name) || !validText(data.targetHost) || !Number.isInteger(listenPort) || listenPort < 1 || listenPort > 65535 || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535 || !['tcp', 'udp', 'tcp+udp'].includes(transport)) return null;
@@ -862,7 +879,7 @@ async function installXray() {
   return json(res, 405, { error: 'Method not allowed' });
 }
 async function requestHandler(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host}`); const parts = url.pathname.split('/').filter(Boolean);
+  const url = new URL(req.url, 'http://localhost'); const parts = url.pathname.split('/').filter(Boolean);
   try {
     if (url.pathname.startsWith('/api/auth/')) { const handled = await handleAuth(req, res, url.pathname); if (handled !== false) return; return json(res, 404, { error: 'Not found' }); }
     if (url.pathname === '/api/health' && req.method === 'GET') return json(res, 200, { ok: true });
@@ -883,7 +900,7 @@ async function requestHandler(req, res) {
     const requested = url.pathname === '/' ? 'index.html' : url.pathname.slice(1); const file = path.resolve(root, requested);
     if (!file.startsWith(root + path.sep) || (privateFiles.has(requested) || requested.startsWith('runtime/') || requested.startsWith('.xray-install-')) || !fs.existsSync(file)) return json(res, 404, { error: 'Not found' });
     res.writeHead(200, { ...securityHeaders, 'Content-Type': types[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); fs.createReadStream(file).pipe(res);
-  } catch (error) { json(res, 500, { error: error.message || 'Server error' }); }
+  } catch (error) { const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500; if (statusCode >= 500) console.error(`Request failed: ${error.message || error}`); json(res, statusCode, { error: statusCode >= 500 ? '服务器处理请求失败，请查看服务日志' : (error.message || '请求无效') }); }
 }
 const server = http.createServer(requestHandler);
 if (require.main === module) {

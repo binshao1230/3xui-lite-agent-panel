@@ -93,20 +93,32 @@ function postJson(urlText, payload) {
 }
 function relayState(rule, runtime) { return { id: rule.id, status: runtime.status, lastError: runtime.lastError || '', bytesIn: runtime.bytesIn, bytesOut: runtime.bytesOut, connections: runtime.connections, updatedAt: new Date().toISOString() }; }
 function relayStates() { return [...relays.values()].map(item => relayState(item.rule, item.runtime)); }
-function stopRelay(relayId) { const item = relays.get(relayId); if (!item) return; for (const server of item.runtime.servers) try { server.close(); } catch {} for (const socket of item.runtime.udpClients.values()) try { socket.close(); } catch {} relays.delete(relayId); }
+function stopRelay(relayId) { const item = relays.get(relayId); if (!item) return; for (const server of item.runtime.servers) try { server.close(); } catch {} closeUdpClients(item.runtime.udpClients); relays.delete(relayId); }
 function createTcp(rule, runtime) {
   const server = net.createServer(client => { runtime.connections++; const upstream = net.connect({ host: rule.targetHost, port: rule.targetPort }); let closed = false; const close = () => { if (closed) return; closed = true; runtime.connections = Math.max(0, runtime.connections - 1); client.destroy(); upstream.destroy(); }; client.on('data', chunk => { runtime.bytesIn += chunk.length; }); upstream.on('data', chunk => { runtime.bytesOut += chunk.length; }); client.on('error', close); upstream.on('error', error => { runtime.lastError = error.message; close(); }); client.on('close', close); upstream.on('close', close); client.pipe(upstream); upstream.pipe(client); });
   runtime.servers.push(server); return new Promise((resolve, reject) => { const fail = error => reject(error); server.once('error', fail); server.listen(rule.listenPort, rule.bindAddress, () => { server.removeListener('error', fail); server.on('error', error => { runtime.status = 'error'; runtime.lastError = error.message; }); resolve(); }); });
 }
-function createUdp(rule, runtime) {
-  const server = dgram.createSocket('udp4'); runtime.servers.push(server); const clients = runtime.udpClients;
-  server.on('message', (message, remote) => { runtime.bytesIn += message.length; const key = `${remote.address}:${remote.port}`; let upstream = clients.get(key); if (!upstream) { upstream = dgram.createSocket('udp4'); upstream.on('message', reply => { runtime.bytesOut += reply.length; server.send(reply, remote.port, remote.address); }); upstream.on('error', error => { runtime.lastError = error.message; }); clients.set(key, upstream); } upstream.send(message, rule.targetPort, rule.targetHost); });
-  return new Promise((resolve, reject) => { const fail = error => reject(error); server.once('error', fail); server.bind(rule.listenPort, rule.bindAddress, () => { server.removeListener('error', fail); server.on('error', error => { runtime.status = 'error'; runtime.lastError = error.message; }); resolve(); }); });
+function closeUdpClients(clients) {
+  for (const entry of clients.values()) { if (entry?.timer) clearTimeout(entry.timer); try { (entry?.socket || entry).close(); } catch {} }
+  clients.clear();
 }
-async function startRelay(rule) {
+function createUdp(rule, runtime) {
+  const server = dgram.createSocket('udp4'); runtime.servers.push(server); const clients = runtime.udpClients; const idleMs = 2 * 60 * 1000;
+  server.on('message', (message, remote) => {
+    runtime.bytesIn += message.length; const key = `${remote.address}:${remote.port}`; let entry = clients.get(key);
+    if (!entry) {
+      const socket = dgram.createSocket('udp4'); entry = { socket, timer: null };
+      const closeEntry = () => { if (entry.timer) clearTimeout(entry.timer); if (clients.get(key) === entry) clients.delete(key); try { socket.close(); } catch {} };
+      const refresh = () => { if (entry.timer) clearTimeout(entry.timer); entry.timer = setTimeout(closeEntry, idleMs); entry.timer.unref?.(); };
+      entry.refresh = refresh; socket.on('message', reply => { runtime.bytesOut += reply.length; server.send(reply, remote.port, remote.address); refresh(); }); socket.on('error', error => { runtime.lastError = error.message; closeEntry(); }); clients.set(key, entry);
+    }
+    entry.refresh(); entry.socket.send(message, rule.targetPort, rule.targetHost);
+  });
+  return new Promise((resolve, reject) => { const fail = error => reject(error); server.once('error', fail); server.bind(rule.listenPort, rule.bindAddress, () => { server.removeListener('error', fail); server.on('error', error => { runtime.status = 'error'; runtime.lastError = error.message; }); resolve(); }); });
+}async function startRelay(rule) {
   const runtime = { status: 'starting', lastError: '', bytesIn: 0, bytesOut: 0, connections: 0, servers: [], udpClients: new Map() }; relays.set(rule.id, { rule, runtime, signature: JSON.stringify(rule) });
   try { if (rule.transport === 'tcp' || rule.transport === 'tcp+udp') await createTcp(rule, runtime); if (rule.transport === 'udp' || rule.transport === 'tcp+udp') await createUdp(rule, runtime); runtime.status = 'running'; console.log(`[agent] relay ${rule.name} is running on ${rule.bindAddress}:${rule.listenPort}`); }
-  catch (error) { runtime.status = 'error'; runtime.lastError = error.message; for (const server of runtime.servers) try { server.close(); } catch {} for (const socket of runtime.udpClients.values()) try { socket.close(); } catch {} console.error(`[agent] relay ${rule.name} failed: ${error.message}`); }
+  catch (error) { runtime.status = 'error'; runtime.lastError = error.message; for (const server of runtime.servers) try { server.close(); } catch {} closeUdpClients(runtime.udpClients); console.error(`[agent] relay ${rule.name} failed: ${error.message}`); }
 }
 async function syncRelays(tasks) {
   const wanted = new Map((Array.isArray(tasks) ? tasks : []).filter(rule => Number.isInteger(Number(rule.id)) && rule.targetHost && rule.listenPort && rule.targetPort).map(rule => [Number(rule.id), { ...rule, id: Number(rule.id) }]));
