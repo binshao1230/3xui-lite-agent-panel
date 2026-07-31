@@ -23,7 +23,7 @@ const loginAttempts = new Map();
 const runtime = { child: null, startedAt: '', lastError: '', lastLog: '', installing: false };
 const networkState = { publicAddress: '', source: '', checkedAt: '', error: '', checking: false };
 const relayRuntimes = new Map();
-const privateFiles = new Set(['settings.json', 'users.json', 'inbounds.json', 'relays.json', 'traffic.json', 'agents.json', 'runtime-xray.json']);
+const publicFiles = new Set(['index.html', 'style.css', 'app.js', 'agent.js']);
 
 const seedRelays = [];
 const protocolMap = { 'VLESS + Reality': 'vless-reality', VLESS: 'vless', 'VLESS + TLS': 'vless-tls', 'VLESS + WebSocket': 'vless-ws', 'VLESS + gRPC': 'vless-grpc', 'Trojan + TLS': 'trojan-tls', Shadowsocks: 'shadowsocks' };
@@ -37,7 +37,8 @@ const securityHeaders = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options'
 const seedUsers = [];
 
 function token(bytes = 16) { return crypto.randomBytes(bytes).toString('base64url'); }
-function id() { return Date.now() + Math.floor(Math.random() * 1000); }
+let lastGeneratedId = 0;
+function id() { const now = Date.now() * 1000; lastGeneratedId = Math.max(now, lastGeneratedId + 1); return lastGeneratedId; }
 function passwordHash(password, salt = token(16)) { return { salt, hash: crypto.scryptSync(password, salt, 64).toString('base64') }; }
 function defaultSettings() {
   return { admin: { username: 'admin', ...passwordHash('admin'), mustChangePassword: false }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '' } };
@@ -237,14 +238,19 @@ function buildNode(data, forcedId = id(), forcedStatus = 'running') {
   if (protocolKey === 'shadowsocks') return makeShadowsocks(input, forcedId, forcedStatus);
   return makeVlessReality(input, forcedId, forcedStatus);
 }
+function vlessTransportShareLink(clientId, address, port, name, stream) {
+  const network = stream.network || 'tcp'; const security = stream.security === 'tls' ? 'tls' : 'none'; const sni = stream.tlsSettings?.serverName || address; const tlsQuery = security === 'tls' ? `&sni=${encodeURIComponent(sni)}` : '';
+  if (network === 'ws') { const ws = stream.wsSettings || {}; return `vless://${clientId}@${address}:${port}?type=ws&encryption=none&security=${security}${tlsQuery}&host=${encodeURIComponent(ws.headers?.Host || sni)}&path=${encodeURIComponent(ws.path || '/vless')}#${shareName(name)}`; }
+  if (network === 'grpc') { const serviceName = stream.grpcSettings?.serviceName || 'vless-grpc'; return `vless://${clientId}@${address}:${port}?type=grpc&encryption=none&security=${security}${tlsQuery}&serviceName=${encodeURIComponent(serviceName)}&mode=gun#${shareName(name)}`; }
+  return `vless://${clientId}@${address}:${port}?type=tcp&encryption=none&security=${security}${tlsQuery}#${shareName(name)}`;
+}
 function shareLinkForInbound(inbound) {
   const settings = inbound.settings || {}; const stream = inbound.streamSettings || {}; const client = settings.clients?.[0] || {}; const address = inbound.serverAddress; const port = inbound.port;
   if (inbound.protocolCode === 'vless') {
     if (inbound.security === 'Reality') { const reality = stream.realitySettings || {}; const config = reality.settings || {}; const sni = reality.serverNames?.[0] || ''; const sid = reality.shortIds?.[0] || ''; const flow = client.flow || 'xtls-rprx-vision'; return `vless://${client.id}@${address}:${port}?type=tcp&encryption=none&security=reality&pbk=${config.publicKey || ''}&fp=${config.fingerprint || 'chrome'}&sni=${encodeURIComponent(sni)}&sid=${sid}&spx=%2F&flow=${flow}#${shareName(inbound.name)}`; }
-    if (stream.security === 'tls') { const sni = stream.tlsSettings?.serverName || address; if (stream.network === 'ws') { const ws = stream.wsSettings || {}; return `vless://${client.id}@${address}:${port}?type=ws&encryption=none&security=tls&sni=${encodeURIComponent(sni)}&host=${encodeURIComponent(ws.headers?.Host || sni)}&path=${encodeURIComponent(ws.path || '/vless')}#${shareName(inbound.name)}`; } if (stream.network === 'grpc') { const serviceName = stream.grpcSettings?.serviceName || 'vless-grpc'; return `vless://${client.id}@${address}:${port}?type=grpc&encryption=none&security=tls&sni=${encodeURIComponent(sni)}&serviceName=${encodeURIComponent(serviceName)}&mode=gun#${shareName(inbound.name)}`; } return `vless://${client.id}@${address}:${port}?type=tcp&encryption=none&security=tls&sni=${encodeURIComponent(sni)}#${shareName(inbound.name)}`; }
-    return `vless://${client.id}@${address}:${port}?type=tcp&encryption=none&security=none#${shareName(inbound.name)}`;
+    return vlessTransportShareLink(client.id, address, port, inbound.name, stream);
   }
-  if (inbound.protocolCode === 'trojan') { const sni = stream.tlsSettings?.serverName || address; return `trojan://${client.password}@${address}:${port}?security=tls&type=tcp&sni=${encodeURIComponent(sni)}#${shareName(inbound.name)}`; }
+  if (inbound.protocolCode === 'trojan') { const tls = stream.security === 'tls'; const sniQuery = tls ? `&sni=${encodeURIComponent(stream.tlsSettings?.serverName || address)}` : ''; return `trojan://${client.password}@${address}:${port}?security=${tls ? 'tls' : 'none'}&type=tcp${sniQuery}#${shareName(inbound.name)}`; }
   if (inbound.protocolCode === 'shadowsocks') { const credentials = Buffer.from(`${settings.method}:${settings.password}:${client.password}`).toString('base64url'); return `ss://${credentials}@${address}:${port}#${shareName(inbound.name)}`; }
   return inbound.shareLink || '';
 }
@@ -276,7 +282,7 @@ function import3xuiInbound(data) {
     else { protocolKey = 'vless'; protocol = 'VLESS'; }
   } else if (protocolCode === 'trojan') {
     if (!Array.isArray(settings.clients) || !settings.clients[0]?.password) throw new Error('Trojan 配置缺少至少一个客户端密码');
-    protocolKey = 'trojan-tls'; protocol = 'Trojan + TLS'; security = transportSecurity === 'tls' ? 'TLS' : 'None';
+    protocolKey = 'trojan-tls'; protocol = transportSecurity === 'tls' ? 'Trojan + TLS' : 'Trojan'; security = transportSecurity === 'tls' ? 'TLS' : 'None';
   } else {
     if (!settings.method || !settings.password) throw new Error('Shadowsocks 配置缺少 method 或 password');
     protocolKey = 'shadowsocks'; protocol = 'Shadowsocks'; security = 'SS2022';
@@ -286,7 +292,7 @@ function import3xuiInbound(data) {
     security, remark: cleanText(data.remark || source.remark, '', 180), agentId: cleanText(data.agentId, '', 80), status: source.enable === false ? 'stopped' : 'running', settings, streamSettings, sniffing,
     xray: { listen: typeof source.listen === 'string' ? source.listen : '', port: listenPort, protocol: protocolCode, settings, streamSettings, tag: cleanText(source.tag, `inbound-${listenPort}`, 120), sniffing }
   };
-  alignInboundWith3xui(inbound); inbound.template = `3x-ui ${protocolLabels[protocolKey] || protocol} 兼容配置`; inbound.shareLink = shareLinkForInbound(inbound);
+  alignInboundWith3xui(inbound); inbound.template = `3x-ui ${protocol} 兼容配置`; inbound.shareLink = shareLinkForInbound(inbound);
   if (!inbound.shareLink) throw new Error('导入配置无法生成客户端链接，请确认客户端字段完整');
   return inbound;
 }function updateInbound(existing, data) {
@@ -308,27 +314,22 @@ function normalizeInbound(item) {
 }
 function accessClientKey(protocolCode) { return protocolCode === 'vless' ? 'id' : 'password'; }
 function userAccessForInbound(inbound, user) {
-  const email = user.email;
+  const email = user.email; const shareLabel = `${inbound.name}-${user.name}`;
   if (inbound.protocolCode === 'vless') {
     const client = { id: crypto.randomUUID(), email }; const stream = inbound.streamSettings || {}; let link;
     if (inbound.security === 'Reality') {
       client.flow = inbound.settings.clients?.[0]?.flow || 'xtls-rprx-vision'; const reality = stream.realitySettings || {}; const sni = reality.serverNames?.[0] || ''; const sid = reality.shortIds?.[0] || ''; const config = reality.settings || {};
-      link = `vless://${client.id}@${inbound.serverAddress}:${inbound.port}?type=tcp&encryption=none&security=reality&pbk=${config.publicKey || ''}&fp=${config.fingerprint || 'chrome'}&sni=${encodeURIComponent(sni)}&sid=${sid}&spx=%2F&flow=${client.flow}#${shareName(`${inbound.name}-${user.name}`)}`;
-    } else if (stream.security === 'tls') {
-      const sni = stream.tlsSettings?.serverName || inbound.serverAddress;
-      if (stream.network === 'ws') { const ws = stream.wsSettings || {}; const wsPath = ws.path || '/vless'; const host = ws.headers?.Host || sni; link = `vless://${client.id}@${inbound.serverAddress}:${inbound.port}?type=ws&encryption=none&security=tls&sni=${encodeURIComponent(sni)}&host=${encodeURIComponent(host)}&path=${encodeURIComponent(wsPath)}#${shareName(`${inbound.name}-${user.name}`)}`; }
-      else if (stream.network === 'grpc') { const serviceName = stream.grpcSettings?.serviceName || 'vless-grpc'; link = `vless://${client.id}@${inbound.serverAddress}:${inbound.port}?type=grpc&encryption=none&security=tls&sni=${encodeURIComponent(sni)}&serviceName=${encodeURIComponent(serviceName)}&mode=gun#${shareName(`${inbound.name}-${user.name}`)}`; }
-      else link = `vless://${client.id}@${inbound.serverAddress}:${inbound.port}?type=tcp&encryption=none&security=tls&sni=${encodeURIComponent(sni)}#${shareName(`${inbound.name}-${user.name}`)}`;
-    } else link = `vless://${client.id}@${inbound.serverAddress}:${inbound.port}?type=tcp&encryption=none&security=none#${shareName(`${inbound.name}-${user.name}`)}`;
+      link = `vless://${client.id}@${inbound.serverAddress}:${inbound.port}?type=tcp&encryption=none&security=reality&pbk=${config.publicKey || ''}&fp=${config.fingerprint || 'chrome'}&sni=${encodeURIComponent(sni)}&sid=${sid}&spx=%2F&flow=${client.flow}#${shareName(shareLabel)}`;
+    } else link = vlessTransportShareLink(client.id, inbound.serverAddress, inbound.port, shareLabel, stream);
     return { inboundId: inbound.id, protocol: inbound.protocol, protocolCode: inbound.protocolCode, client, link };
   }
   if (inbound.protocolCode === 'trojan') {
-    const client = { password: token(18), email }; const sni = inbound.streamSettings.tlsSettings?.serverName || inbound.serverAddress;
-    return { inboundId: inbound.id, protocol: inbound.protocol, protocolCode: inbound.protocolCode, client, link: `trojan://${client.password}@${inbound.serverAddress}:${inbound.port}?security=tls&type=tcp&sni=${encodeURIComponent(sni)}#${shareName(`${inbound.name}-${user.name}`)}` };
+    const client = { password: token(18), email }; const stream = inbound.streamSettings || {}; const tls = stream.security === 'tls'; const sniQuery = tls ? `&sni=${encodeURIComponent(stream.tlsSettings?.serverName || inbound.serverAddress)}` : '';
+    return { inboundId: inbound.id, protocol: inbound.protocol, protocolCode: inbound.protocolCode, client, link: `trojan://${client.password}@${inbound.serverAddress}:${inbound.port}?security=${tls ? 'tls' : 'none'}&type=tcp${sniQuery}#${shareName(shareLabel)}` };
   }
   if (inbound.protocolCode === 'shadowsocks') {
     const method = inbound.settings.method; const client = { password: ss2022Key(method), email, level: 0 }; const credentials = Buffer.from(`${method}:${inbound.settings.password}:${client.password}`).toString('base64url');
-    return { inboundId: inbound.id, protocol: inbound.protocol, protocolCode: inbound.protocolCode, client, link: `ss://${credentials}@${inbound.serverAddress}:${inbound.port}#${shareName(`${inbound.name}-${user.name}`)}` };
+    return { inboundId: inbound.id, protocol: inbound.protocol, protocolCode: inbound.protocolCode, client, link: `ss://${credentials}@${inbound.serverAddress}:${inbound.port}#${shareName(shareLabel)}` };
   }
   return null;
 }function setAccessActive(inbound, access, active) {
@@ -445,10 +446,10 @@ async function handleAgentGateway(req, res, parts) {
   const agentId = cleanText(parts[2], '', 80);
   if (parts.length === 2 && req.method === 'GET') return json(res, 200, readAgents().map(agentPublic));
   if (parts.length === 2 && req.method === 'POST') { const agent = createAgent(await body(req)); if (!agent) return json(res, 400, { error: '请填写机器名称和可被远程访问的控制面板地址（HTTP/HTTPS）' }); const agents = readAgents(); agents.unshift(agent); writeStore(agentFile, agents); return json(res, 201, { agent: agentPublic(agent), deployment: { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } }); }
-  const agents = readAgents(); const agent = agents.find(item => item.id === agentId); if (!agent) return json(res, 404, { error: 'Not found' });
+  const patchData = req.method === 'PATCH' ? await body(req) : null; const agents = readAgents(); const agent = agents.find(item => item.id === agentId); if (!agent) return json(res, 404, { error: 'Not found' });
   if (parts.length === 5 && parts[3] === 'xray' && parts[4] === 'install' && req.method === 'POST') { agent.xrayInstallRequestId = token(12); agent.xrayInstallRequestedAt = new Date().toISOString(); agent.xrayInstallError = ''; agent.updatedAt = agent.xrayInstallRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发 Xray Core 安装任务，等待 Agent 执行。' }); }  if (parts.length === 4 && parts[3] === 'update' && req.method === 'POST') { agent.updateRequestId = token(12); agent.updateRequestedAt = new Date().toISOString(); agent.updatedAt = agent.updateRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发更新请求，等待 Agent 心跳执行。' }); }
   if (parts.length === 4 && parts[3] === 'bootstrap' && req.method === 'GET') return json(res, 200, { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token });
-  if (req.method === 'PATCH') { const data = await body(req); if (data.enabled !== undefined) agent.enabled = Boolean(data.enabled); if (data.controllerUrl !== undefined) { const target = controllerUrl(data.controllerUrl); if (!target) return json(res, 400, { error: '控制面板地址必须是有效的 HTTP/HTTPS 地址' }); agent.controllerUrl = target; } if (data.name !== undefined) { const name = cleanText(data.name, '', 80); if (!name) return json(res, 400, { error: '机器名称不能为空' }); agent.name = name; } if (data.rotateToken === true) agent.token = token(32); agent.updatedAt = new Date().toISOString(); writeStore(agentFile, agents); return json(res, 200, { agent: agentPublic(agent), deployment: (data.rotateToken === true || data.controllerUrl !== undefined) ? { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } : undefined }); }
+  if (req.method === 'PATCH') { const data = patchData; if (data.enabled !== undefined) agent.enabled = Boolean(data.enabled); if (data.controllerUrl !== undefined) { const target = controllerUrl(data.controllerUrl); if (!target) return json(res, 400, { error: '控制面板地址必须是有效的 HTTP/HTTPS 地址' }); agent.controllerUrl = target; } if (data.name !== undefined) { const name = cleanText(data.name, '', 80); if (!name) return json(res, 400, { error: '机器名称不能为空' }); agent.name = name; } if (data.rotateToken === true) agent.token = token(32); agent.updatedAt = new Date().toISOString(); writeStore(agentFile, agents); return json(res, 200, { agent: agentPublic(agent), deployment: (data.rotateToken === true || data.controllerUrl !== undefined) ? { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } : undefined }); }
   if (req.method === 'DELETE') { writeStore(agentFile, agents.filter(item => item.id !== agentId)); return json(res, 204); }
   return json(res, 405, { error: 'Method not allowed' });
 }function normalizeRelay(item) {
@@ -567,7 +568,14 @@ function createRelay(data) {
 }
 function updateRelay(existing, data) { const candidate = createRelay({ ...existing, ...data }); return candidate ? { ...candidate, id: existing.id, status: existing.status, createdAt: existing.createdAt, updatedAt: new Date().toISOString() } : null; }
 function relayPortConflict(relays, candidate, ignoredId = null) { const usesTcp = mode => mode === 'tcp' || mode === 'tcp+udp'; const usesUdp = mode => mode === 'udp' || mode === 'tcp+udp'; return relays.some(item => item.id !== ignoredId && (item.agentId || '') === candidate.agentId && item.listenPort === candidate.listenPort && ((usesTcp(item.transport) && usesTcp(candidate.transport)) || (usesUdp(item.transport) && usesUdp(candidate.transport)))); }
-async function activateRelayRule(relay) { if (relay.agentId) { relay.runtimeStatus = 'starting'; relay.lastError = ''; return; } try { const snapshot = await startRelay(relay); Object.assign(relay, snapshot, { status: 'running', lastError: '' }); } catch (error) { relay.status = 'stopped'; relay.runtimeStatus = 'error'; relay.lastError = error.message || '监听端口失败'; } }async function handleAuth(req, res, pathname) {
+async function activateRelayRule(relay) { if (relay.agentId) { relay.runtimeStatus = 'starting'; relay.lastError = ''; return; } try { const snapshot = await startRelay(relay); Object.assign(relay, snapshot, { status: 'running', lastError: '' }); } catch (error) { relay.status = 'stopped'; relay.runtimeStatus = 'error'; relay.lastError = error.message || '监听端口失败'; } }
+function persistRelayState(relay, expectedUpdatedAt = relay.updatedAt) {
+  const relays = readStore(relayFile, seedRelays, normalizeRelay); const index = relays.findIndex(item => item.id === relay.id);
+  if (index < 0 || relays[index].updatedAt !== expectedUpdatedAt) return false;
+  Object.assign(relays[index], { status: relay.status, runtimeStatus: relay.runtimeStatus, lastError: relay.lastError || '', bytesIn: Number(relay.bytesIn || 0), bytesOut: Number(relay.bytesOut || 0), connections: Number(relay.connections || 0) });
+  writeStore(relayFile, relays); return true;
+}
+async function handleAuth(req, res, pathname) {
   if (pathname === '/api/auth/me' && req.method === 'GET') {
     const session = currentSession(req); const settings = readSettings();
     return json(res, 200, { authenticated: Boolean(session), username: session?.username || '', mustChangePassword: Boolean(session && settings.admin.mustChangePassword) });
@@ -614,16 +622,24 @@ async function handleRelays(req, res, parts) {
   if (parts.length === 2 && req.method === 'POST') {
     const relay = createRelay(await body(req)); if (!relay) return json(res, 400, { error: '请填写规则名称、协议、监听端口与目标地址' }); const agents = readAgents();
     if (relay.agentId && !agents.some(agent => agent.id === relay.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const relays = readStore(relayFile, seedRelays, normalizeRelay);
-    if (relayPortConflict(relays, relay)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' }); relays.unshift(relay); await activateRelayRule(relay); writeStore(relayFile, relays); return json(res, 201, relaySnapshot(relay));
+    if (relayPortConflict(relays, relay)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' }); relays.unshift(relay); writeStore(relayFile, relays); await activateRelayRule(relay); if (!persistRelayState(relay) && !relay.agentId) stopRelay(relay.id); return json(res, 201, relaySnapshot(relay));
   }
   if (!Number.isInteger(relayId)) return json(res, 404, { error: 'Not found' });
   if (parts.length === 4 && parts[3] === 'diagnose' && req.method === 'POST') { const relay = readStore(relayFile, seedRelays, normalizeRelay).find(item => item.id === relayId); if (!relay) return json(res, 404, { error: 'Not found' }); return json(res, 200, await diagnoseRelay(relay)); }
   if (req.method === 'PATCH') {
     const data = await body(req); const relays = readStore(relayFile, seedRelays, normalizeRelay); const index = relays.findIndex(item => item.id === relayId); if (index < 0) return json(res, 404, { error: 'Not found' }); const relay = relays[index];
-    if (Object.keys(data).length === 1 && Object.prototype.hasOwnProperty.call(data, 'status')) { if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' }); relay.status = data.status; relay.updatedAt = new Date().toISOString(); if (relay.agentId) { relay.runtimeStatus = data.status === 'running' ? 'starting' : 'stopped'; relay.lastError = ''; } else if (data.status === 'running') await activateRelayRule(relay); else { stopRelay(relay.id); relay.runtimeStatus = 'stopped'; relay.lastError = ''; } writeStore(relayFile, relays); return json(res, 200, relaySnapshot(relay)); }
+    if (Object.keys(data).length === 1 && Object.prototype.hasOwnProperty.call(data, 'status')) {
+      if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' });
+      relay.status = data.status; relay.updatedAt = new Date().toISOString();
+      if (relay.agentId) { relay.runtimeStatus = data.status === 'running' ? 'starting' : 'stopped'; relay.lastError = ''; }
+      else if (data.status === 'stopped') { stopRelay(relay.id); relay.runtimeStatus = 'stopped'; relay.lastError = ''; }
+      writeStore(relayFile, relays);
+      if (!relay.agentId && data.status === 'running') { await activateRelayRule(relay); if (!persistRelayState(relay)) stopRelay(relay.id); }
+      return json(res, 200, relaySnapshot(relay));
+    }
     const updated = updateRelay(relay, data); if (!updated) return json(res, 400, { error: '规则名称、协议、监听端口与目标地址必须有效' }); const agents = readAgents();
     if (updated.agentId && !agents.some(agent => agent.id === updated.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); if (relayPortConflict(relays, updated, relayId)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' });
-    if (!relay.agentId) stopRelay(relay.id); relays[index] = updated; if (updated.status === 'running') await activateRelayRule(updated); writeStore(relayFile, relays); return json(res, 200, relaySnapshot(updated));
+    if (!relay.agentId) stopRelay(relay.id); relays[index] = updated; writeStore(relayFile, relays); if (updated.status === 'running') { await activateRelayRule(updated); if (!persistRelayState(updated) && !updated.agentId) stopRelay(updated.id); } return json(res, 200, relaySnapshot(updated));
   }
   if (req.method === 'DELETE') { const relays = readStore(relayFile, seedRelays, normalizeRelay); const relay = relays.find(item => item.id === relayId); if (!relay) return json(res, 404, { error: 'Not found' }); if (!relay.agentId) stopRelay(relayId); writeStore(relayFile, relays.filter(item => item.id !== relayId)); return json(res, 204); }
   return json(res, 405, { error: 'Method not allowed' });
@@ -669,15 +685,15 @@ async function handleRelays(req, res, parts) {
   if (parts.length === 2 && req.method === 'POST') {
     const data = await body(req); const user = createUser(data); if (!user) return json(res, 400, { error: '请填写有效的用户名称、邮箱和配额' });
     const users = readStore(userFile, seedUsers); if (users.some(item => item.email.toLowerCase() === user.email)) return json(res, 409, { error: '该邮箱已存在' });
-    const inboundId = Number(data.inboundId);
+    const inboundId = Number(data.inboundId); let syncUserRuntime = null;
     if (data.inboundId && !Number.isInteger(inboundId)) return json(res, 400, { error: '入站选择无效' });
     if (inboundId) {
       const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const inbound = inbounds.find(item => item.id === inboundId);
       if (!inbound) return json(res, 404, { error: '选定的入站不存在' });
       if (inbound.status !== 'running') return json(res, 400, { error: '\u9009\u5b9a\u7684\u5165\u7ad9\u5df2\u6682\u505c\uff0c\u4e0d\u80fd\u5206\u914d\u7528\u6237' }); const tlsError = inboundTlsError(inbound); if (tlsError) return json(res, 400, { error: tlsError }); const access = userAccessForInbound(inbound, user); if (!access) return json(res, 400, { error: '该入站协议暂不支持用户分配' });
-      user.access = [access]; setAccessActive(inbound, access, true); writeStore(inboundFile, inbounds); if (!inbound.agentId && inbound.status === 'running') await ensureLocalRuntime(); else await syncRuntimeIfRunning();
+      user.access = [access]; setAccessActive(inbound, access, true); writeStore(inboundFile, inbounds); syncUserRuntime = () => !inbound.agentId && inbound.status === 'running' ? ensureLocalRuntime() : syncRuntimeIfRunning();
     }
-    users.unshift(user); writeStore(userFile, users); return json(res, 201, user);
+    users.unshift(user); writeStore(userFile, users); if (syncUserRuntime) await syncUserRuntime(); return json(res, 201, user);
   }
   if (!Number.isInteger(userId)) return json(res, 404, { error: 'Not found' });
   if (req.method === 'PATCH') {
@@ -687,13 +703,15 @@ async function handleRelays(req, res, parts) {
     if (data.status === 'running' && userExpired({ expire })) return json(res, 400, { error: '到期用户不能重新启用，请先设置未来的到期日期' });
     user.expire = expire; if (data.limitGB !== undefined) { const limit = Number(data.limitGB); if (!Number.isFinite(limit) || limit <= 0) return json(res, 400, { error: '配额无效' }); user.limitGB = Math.round(limit); }
     const expired = userExpired(user); if (data.status !== undefined) user.status = data.status; if (expired) user.status = 'stopped';
+    writeStore(userFile, users);
     if (data.status !== undefined || expired) { const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); for (const access of user.access || []) setAccessActive(inbounds.find(item => item.id === access.inboundId), access, user.status === 'running'); writeStore(inboundFile, inbounds); const localEnabled = user.status === 'running' && (user.access || []).some(access => { const inbound = inbounds.find(item => item.id === access.inboundId); return inbound && !inbound.agentId && inbound.status === 'running'; }); if (localEnabled) await ensureLocalRuntime(); else await syncRuntimeIfRunning(); }
-    writeStore(userFile, users); return json(res, 200, user);
+    return json(res, 200, user);
   }
   if (req.method === 'DELETE') {
     const users = readStore(userFile, seedUsers); const user = users.find(item => item.id === userId); if (!user) return json(res, 404, { error: 'Not found' });
-    const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); for (const access of user.access || []) setAccessActive(inbounds.find(item => item.id === access.inboundId), access, false); writeStore(inboundFile, inbounds); await syncRuntimeIfRunning();
-    writeStore(userFile, users.filter(item => item.id !== userId)); return json(res, 204);
+    const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); for (const access of user.access || []) setAccessActive(inbounds.find(item => item.id === access.inboundId), access, false);
+    writeStore(inboundFile, inbounds); writeStore(userFile, users.filter(item => item.id !== userId)); await syncRuntimeIfRunning();
+    return json(res, 204);
   }
   return json(res, 405, { error: 'Method not allowed' });
 }function dateKey(value = new Date()) { return new Date(value).toISOString().slice(0, 10); }
@@ -714,8 +732,8 @@ async function handleTraffic(req, res, parts) {
     if (inboundId && !inbound) return json(res, 404, { error: '入站不存在' });
     user.usedGB = Math.round((Number(user.usedGB || 0) + gb) * 1000) / 1000;
     const reachedLimit = user.usedGB >= Number(user.limitGB || Infinity);
-    if (reachedLimit) { user.status = 'stopped'; for (const access of user.access || []) setAccessActive(inbounds.find(item => item.id === access.inboundId), access, false); writeStore(inboundFile, inbounds); await syncRuntimeIfRunning(); }
-    writeStore(userFile, users);
+    if (reachedLimit) { user.status = 'stopped'; for (const access of user.access || []) setAccessActive(inbounds.find(item => item.id === access.inboundId), access, false); writeStore(inboundFile, inbounds); }
+    writeStore(userFile, users); if (reachedLimit) await syncRuntimeIfRunning();
     const records = readStore(trafficFile, []); const record = { id: id(), userId: user.id, userName: user.name, inboundId: inbound?.id || null, inboundName: inbound?.name || '未指定入站', gb: Math.round(gb * 1000) / 1000, direction, at: new Date().toISOString(), source: 'manual' };
     records.unshift(record); writeStore(trafficFile, records.slice(0, 5000));
     return json(res, 201, { record, user, reachedLimit });
@@ -861,11 +879,10 @@ async function installXray() {
   if (parts.length === 3 && parts[2] === 'stop' && req.method === 'POST') { stopRuntime(); return json(res, 200, runtimeInfo()); }
   return json(res, 405, { error: 'Method not allowed' });
 }async function handleSystem(req, res, pathname) {
-  const settings = readSettings();
-  if (pathname === '/api/system' && req.method === 'GET') return json(res, 200, { admin: { username: settings.admin.username, mustChangePassword: settings.admin.mustChangePassword }, tls: tlsPublic(settings), certbotAvailable: certbotExists(), runtime: runtimeInfo(), network: networkInfo() });
+  if (pathname === '/api/system' && req.method === 'GET') { const settings = readSettings(); return json(res, 200, { admin: { username: settings.admin.username, mustChangePassword: settings.admin.mustChangePassword }, tls: tlsPublic(settings), certbotAvailable: certbotExists(), runtime: runtimeInfo(), network: networkInfo() }); }
   if (pathname === '/api/system/network' && req.method === 'GET') return json(res, 200, networkInfo());
   if (pathname === '/api/system/network/detect' && req.method === 'POST') return json(res, 200, await detectPublicAddress(true));  if (pathname === '/api/system/password' && req.method === 'POST') {
-    const data = await body(req); const candidate = typeof data.currentPassword === 'string' ? passwordHash(data.currentPassword, settings.admin.salt).hash : '';
+    const data = await body(req); const settings = readSettings(); const candidate = typeof data.currentPassword === 'string' ? passwordHash(data.currentPassword, settings.admin.salt).hash : '';
     if (!candidate || !crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(settings.admin.hash))) return json(res, 400, { error: '当前密码不正确' });
     if (typeof data.newPassword !== 'string' || data.newPassword.length < 10 || data.newPassword.length > 128) return json(res, 400, { error: '新密码需为 10–128 个字符' });
     if (data.newPassword === data.currentPassword) return json(res, 400, { error: '新密码不能与当前密码相同' });
@@ -873,14 +890,14 @@ async function installXray() {
     return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, '', 0) });
   }
   if (pathname === '/api/system/tls' && req.method === 'POST') {
-    const data = await body(req); const domain = cleanText(data.domain, '', 253).toLowerCase(); const email = cleanText(data.email, '', 100); const certPath = cleanText(data.certPath, '', 512); const keyPath = cleanText(data.keyPath, '', 512);
+    const data = await body(req); const settings = readSettings(); const domain = cleanText(data.domain, '', 253).toLowerCase(); const email = cleanText(data.email, '', 100); const certPath = cleanText(data.certPath, '', 512); const keyPath = cleanText(data.keyPath, '', 512);
     if (!domainValid(domain) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, 400, { error: '请填写有效域名和通知邮箱' });
     if (Boolean(certPath) !== Boolean(keyPath)) return json(res, 400, { error: '证书和私钥路径必须同时填写' });
     settings.tls = { domain, email, certPath, keyPath, updatedAt: new Date().toISOString() }; writeSettings(settings);
     return json(res, 200, { tls: tlsPublic(settings) });
   }
   if (pathname === '/api/system/tls/request' && req.method === 'POST') {
-    const data = await body(req); const domain = cleanText(data.domain, '', 253).toLowerCase(); const email = cleanText(data.email, '', 100);
+    const data = await body(req); const settings = readSettings(); const domain = cleanText(data.domain, '', 253).toLowerCase(); const email = cleanText(data.email, '', 100);
     if (!domainValid(domain) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, 400, { error: '请填写有效域名和通知邮箱' });
     if (!certbotExists()) return json(res, 409, { error: '未检测到 certbot。请在服务器安装 certbot 后重试：apt install certbot（Debian/Ubuntu）。' });
     const result = spawnSync('certbot', ['certonly', '--standalone', '--preferred-challenges', 'http', '--http-01-port', '80', '-d', domain, '--email', email, '--agree-tos', '--non-interactive', '--keep-until-expiring'], { encoding: 'utf8', timeout: 180000 });
@@ -889,7 +906,7 @@ async function installXray() {
     return json(res, 200, { tls: tlsPublic(settings), message: '证书已申请。请应用到 TLS 入站并重启面板 HTTPS 服务。' });
   }
   if (pathname === '/api/system/tls/apply' && req.method === 'POST') {
-    if (!settings.tls.certPath || !settings.tls.keyPath || !fs.existsSync(settings.tls.certPath) || !fs.existsSync(settings.tls.keyPath)) return json(res, 400, { error: '证书文件不可用，请先保存正确路径或申请证书' });
+    const settings = readSettings(); if (!settings.tls.certPath || !settings.tls.keyPath || !fs.existsSync(settings.tls.certPath) || !fs.existsSync(settings.tls.keyPath)) return json(res, 400, { error: '证书文件不可用，请先保存正确路径或申请证书' });
     const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); let changed = 0;
     for (const inbound of inbounds) if (!inbound.agentId && inbound.streamSettings?.security === 'tls') { inbound.streamSettings.tlsSettings = { ...(inbound.streamSettings.tlsSettings || {}), certificates: [{ certificateFile: settings.tls.certPath, keyFile: settings.tls.keyPath }] }; inbound.xray.streamSettings = inbound.streamSettings; changed++; }
     writeStore(inboundFile, inbounds); if (inbounds.some(inbound => inbound.status === 'running' && !inbound.agentId)) await ensureLocalRuntime(); else await syncRuntimeIfRunning(); return json(res, 200, { changed, message: `已将证书写入 ${changed} 个本机 TLS 入站（VLESS、WebSocket、gRPC 与 Trojan）。远程 Agent 请填写其本机证书路径。` });
@@ -897,8 +914,8 @@ async function installXray() {
   return json(res, 405, { error: 'Method not allowed' });
 }
 async function requestHandler(req, res) {
-  const url = new URL(req.url, 'http://localhost'); const parts = url.pathname.split('/').filter(Boolean);
   try {
+    const url = new URL(req.url, 'http://localhost'); const parts = url.pathname.split('/').filter(Boolean);
     if (url.pathname.startsWith('/api/auth/')) { const handled = await handleAuth(req, res, url.pathname); if (handled !== false) return; return json(res, 404, { error: 'Not found' }); }
     if (url.pathname === '/api/health' && req.method === 'GET') return json(res, 200, { ok: true });
     if (parts[0] === 'api' && parts[1] === 'agent') { await reconcileExpiredUsers(); return handleAgentGateway(req, res, parts); }
@@ -916,9 +933,10 @@ async function requestHandler(req, res) {
     }
     if (req.method !== 'GET') return json(res, 405, { error: 'Method not allowed' });
     const requested = url.pathname === '/' ? 'index.html' : url.pathname.slice(1); const file = path.resolve(root, requested);
-    if (!file.startsWith(root + path.sep) || (privateFiles.has(requested) || requested.startsWith('runtime/') || requested.startsWith('.xray-install-')) || !fs.existsSync(file)) return json(res, 404, { error: 'Not found' });
-    res.writeHead(200, { ...securityHeaders, 'Content-Type': types[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); fs.createReadStream(file).pipe(res);
-  } catch (error) { const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500; if (statusCode >= 500) console.error(`Request failed: ${error.message || error}`); json(res, statusCode, { error: statusCode >= 500 ? '服务器处理请求失败，请查看服务日志' : (error.message || '请求无效') }); }
+    if (!file.startsWith(root + path.sep) || !publicFiles.has(requested) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return json(res, 404, { error: 'Not found' });
+    const stream = fs.createReadStream(file); stream.on('error', error => { console.error(`Static file read failed: ${error.message || error}`); res.destroy(error); });
+    res.writeHead(200, { ...securityHeaders, 'Content-Type': types[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); stream.pipe(res);
+  } catch (error) { const statusCode = error?.code === 'ERR_INVALID_URL' ? 400 : Number.isInteger(error?.statusCode) ? error.statusCode : 500; if (statusCode >= 500) console.error(`Request failed: ${error.message || error}`); json(res, statusCode, { error: statusCode >= 500 ? '服务器处理请求失败，请查看服务日志' : (error.message || '请求无效') }); }
 }
 const server = http.createServer(requestHandler);
 if (require.main === module) {
@@ -938,21 +956,3 @@ if (require.main === module) {
   }
 }
 module.exports = { server, buildNode, import3xuiInbound, createUser, normalizeExpire, userExpired, inboundTlsError, agentInstallScript, readSettings, certificateRequestError };
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

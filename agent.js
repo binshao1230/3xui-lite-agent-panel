@@ -137,4 +137,13 @@ async function shutdown(signal) {
 }
 process.once('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(1)); });
 process.once('SIGINT', () => { shutdown('SIGINT').catch(() => process.exit(1)); });
-(async () => { const handleFailure = error => { if (error.statusCode === 401 || error.statusCode === 403) { for (const relayId of [...relays.keys()]) stopRelay(relayId); stopXray().catch(() => {}); console.error(`[agent] authorization was revoked; all relays and Xray stopped: ${error.message}`); return; } console.error(`[agent] heartbeat failed: ${error.message}`); }; try { const interval = await heartbeat(); if (once) { await heartbeat(); return; } setInterval(() => heartbeat().catch(handleFailure), interval); } catch (error) { handleFailure(error); if (once) process.exitCode = 1; else setInterval(() => heartbeat().catch(handleFailure), 15000); } })();
+(async () => {
+  const handleFailure = error => { if (error.statusCode === 401 || error.statusCode === 403) { for (const relayId of [...relays.keys()]) stopRelay(relayId); stopXray().catch(() => {}); console.error(`[agent] authorization was revoked; all relays and Xray stopped: ${error.message}`); return; } console.error(`[agent] heartbeat failed: ${error.message}`); };
+  const run = async () => {
+    let interval = 15000;
+    try { interval = await heartbeat(); }
+    catch (error) { handleFailure(error); if (once) process.exitCode = 1; }
+    if (!once && !shuttingDown) setTimeout(run, interval);
+  };
+  await run();
+})();
