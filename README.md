@@ -1,4 +1,4 @@
-# 3xUI Lite Agent Panel v0.7.0
+# 3xUI Lite Agent Panel v0.7.1
 
 面向 Linux VPS 的 Xray 管理与中转面板，提供协议配置模板、流量统计、Agent 管理、远程 TCP/UDP 中转、远程入站下发、Agent 自更新，以及远程安装 Xray Core 等能力。
 
@@ -11,6 +11,14 @@ curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/m
 ```
 
 安装程序会在必要时安装 Node.js 20 LTS、安装项目依赖，并启动监听 `3000` 端口的 `3xui-lite-agent-panel` systemd 服务。
+
+该默认命令适合已限制来源地址的管理网络。不要将 HTTP 管理端口向 `0.0.0.0/0` 开放；生产环境应优先使用 HTTPS 反向代理，并把面板仅绑定到回环地址：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/main/install.sh | sudo PANEL_HOST=127.0.0.1 SECURE_COOKIE=true TRUST_PROXY=true bash
+```
+
+安装后检查服务：
 
 ```bash
 sudo systemctl status 3xui-lite-agent-panel
@@ -25,6 +33,14 @@ curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/m
 
 初始账号密码为 `admin / admin`。首次登录后，面板会强制修改默认密码；完成前其他管理 API 保持锁定。
 
+## v0.7.1 可靠性修复
+
+- 数据文件损坏时停止写入并返回错误，不再退回默认管理员或用空数组覆盖原数据。
+- 修复并发登录限流、小数流量配额、入站与中转端口冲突，以及入站编辑字段和用户链接不同步。
+- 3x-ui 导入节点编辑时保留原始协议、自定义传输字段与客户端凭据，避免被内置模板覆盖。
+- 修复离线 Agent 入站无法暂停、退出后敏感界面残留、密码弹窗字段残留和可选接口拖垮主界面。
+- HTTPS 请求自动使用 Secure Cookie；备份与 Agent 凭据读取进入审计记录。
+- Agent 长期令牌移出进程参数，改由权限为 `0600` 的 systemd 环境文件加载。
 
 ## v0.7 商用运维基线
 
@@ -35,27 +51,29 @@ curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/m
 - **安全状态总览**：系统页集中显示默认密码、HTTPS、Secure Cookie 和审计状态。
 - **数据引用保护**：仍承载资源的 Agent、仍分配给用户的入站不能直接删除，避免产生悬空配置。
 - **部署加固**：systemd 服务增加内核、SUID、地址族、资源上限和停止超时限制。
-## 无法从外网访问时
+## 管理入口与防火墙
 
-面板默认显式监听 `0.0.0.0:3000`。如果本机服务正常但浏览器访问超时，请检查云平台安全组和系统防火墙：
+面板默认显式监听 `0.0.0.0:3000`，仅应在云安全组和系统防火墙已限制管理来源时使用。如果本机服务正常但浏览器访问超时，请先确认监听状态：
 
 ```bash
 sudo ss -lntp | grep :3000
 curl http://127.0.0.1:3000/api/health
 ```
 
-在腾讯云、阿里云、AWS 等云平台的安全组/防火墙中，添加一条入站规则：`TCP`、端口 `3000`、来源按实际管理 IP 限制（测试时可临时使用 `0.0.0.0/0`）。若系统使用 UFW：
+在腾讯云、阿里云、AWS 等云平台的安全组/防火墙中，添加一条入站规则：`TCP`、端口 `3000`、来源为实际管理 IP 或管理网段，禁止使用 `0.0.0.0/0`。若系统使用 UFW，请将示例地址替换为管理员出口公网 IP：
 
 ```bash
-sudo ufw allow 3000/tcp
+sudo ufw allow from 203.0.113.10/32 to any port 3000 proto tcp
 sudo ufw status
 ```
 
-## 离线部署包
+## Linux 发布包
 
-`release/3xui-lite-linux.tar.gz` 包含同一份可部署源码。解压后运行：
+`release/3xui-lite-linux.tar.gz` 包含同一份可部署源码，但不内置 `node_modules`，安装时仍需访问 npm。解压后运行：
 
 ```bash
+tar -xzf 3xui-lite-linux.tar.gz
+cd 3xui-lite-linux
 sudo bash ./deploy-linux.sh
 ```
 
@@ -100,7 +118,7 @@ TLS、WebSocket、gRPC 和 Trojan 模板不会再在缺少证书时写入会使 
 ## 商用部署基线
 
 - 不要直接把 HTTP 面板暴露到公网；使用 Nginx、Caddy 或负载均衡器提供 HTTPS，并将面板端口限制为反向代理或管理网段可访问。
-- HTTPS 反向代理场景可用 `SECURE_COOKIE=true TRUST_PROXY=true` 部署，使管理员会话 Cookie 仅通过 HTTPS 发送，并信任反向代理的 HTTPS 标记：`curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/main/install.sh | sudo SECURE_COOKIE=true TRUST_PROXY=true bash`。面板端口必须同时限制为仅反向代理可访问。
-- 首次登录后请尽快修改默认管理员密码；面板不会强制拦截管理操作。
+- HTTPS 反向代理场景可用 `SECURE_COOKIE=true TRUST_PROXY=true` 部署，使管理员会话 Cookie 仅通过 HTTPS 发送，并信任反向代理的 HTTPS 标记：`curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/main/install.sh | sudo PANEL_HOST=127.0.0.1 SECURE_COOKIE=true TRUST_PROXY=true bash`。面板端口必须同时限制为仅反向代理可访问。
+- 首次登录后必须修改默认管理员密码；完成前面板会拦截其他管理操作。
 - 面板数据采用私有文件权限和原子写入；仍应对 `/opt/3xui-lite-agent-panel` 中的运行数据定期离机备份，并在升级前创建快照。
 - 建议仅放行面板 HTTPS、已启用节点端口和必要的 Agent 回连路径；Agent 令牌、管理员 Cookie 与节点 JSON 都应视为敏感凭据。

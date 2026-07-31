@@ -14,30 +14,61 @@ const inboundTemplates = {
   'VLESS + gRPC': { key: 'grpc', name: 'VLESS gRPC + TLS 模板', desc: 'gRPC + TLS，自动使用 serviceName；适合 HTTP/2 反向代理场景。', defaults: { port: '443', sni: '', serviceName: 'vless-grpc' } },  'Trojan + TLS': { key: 'tls', name: 'Trojan TLS 模板', desc: 'TCP + TLS，自动生成 Trojan 密码和 trojan:// 链接；远程 Agent 需填写证书路径。', defaults: { port: '443', sni: '', fingerprint: 'chrome' } },
   Shadowsocks: { key: 'ss', name: 'Shadowsocks 2022 模板', desc: 'TCP/UDP SS2022，自动生成服务端 PSK、用户 PSK 和 ss:// 链接。', defaults: { port: '8388', method: '2022-blake3-aes-128-gcm' } }
 };
-let relays = [], inbounds = [], users = [], agents = [], auditEntries = [], filter = 'all', systemInfo = null, traffic = null, editingInboundId = null, editingRelayId = null;
+let relays = [], inbounds = [], users = [], agents = [], auditEntries = [], filter = 'all', systemInfo = null, traffic = null, editingInboundId = null, editingRelayId = null, editingUserId = null;
 const agentCardCollapsed = new Set((() => { try { const value = JSON.parse(localStorage.getItem('3xui-agent-collapsed') || '[]'); return Array.isArray(value) ? value : []; } catch { return []; } })());
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, match => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[match]));
+const loginDefaultNote = '请输入管理员凭据。首次部署请查看安装输出中的初始凭据。';
+
+function setApplicationLocked(locked) {
+  [$('.sidebar'), $('main')].forEach(element => {
+    if (!element) return;
+    element.toggleAttribute('inert', locked);
+    if (locked) element.setAttribute('aria-hidden', 'true'); else element.removeAttribute('aria-hidden');
+  });
+}
+
+function clearAuthenticatedState() {
+  relays = []; inbounds = []; users = []; agents = []; auditEntries = []; systemInfo = null; traffic = null; editingInboundId = null; editingRelayId = null; editingUserId = null;
+  ['#cards', '#inboundCards', '#userCards', '#agentCards', '#health', '#trafficDays', '#trafficInbounds', '#trafficUsers', '#trafficLog', '#auditLog', '#securityChecks', '#agentDetailsBody', '#agentCommand', '#toastStack'].forEach(selector => $(selector)?.replaceChildren());
+  $('#overviewChart').innerHTML = '<p class="empty-state">暂无流量数据。</p>';
+  $('#inboundCount').innerHTML = '0 <small>在线 / 0 已启用 · 共 0</small>'; $('#activeCount').textContent = '0'; $('#userCount').textContent = '0';
+  $('#agentOnlineCount').textContent = '0'; $('#agentTotalCount').textContent = '0';
+  $('#overviewTraffic').innerHTML = '0 <small>GB</small>'; $('#overviewTrafficNote').textContent = '暂无流量记录';
+  $('#trafficTotal').innerHTML = '0 <small>GB</small>'; $('#trafficRecorded').innerHTML = '0 <small>GB</small>'; $('#trafficActive').textContent = '0'; $('#trafficRecords').textContent = '0';
+  $('#adminName').textContent = '-'; $('#tlsSummary').textContent = '登录后读取证书状态。'; $('#securitySummary').textContent = '登录后评估面板安全状态。'; $('#securityGrade').textContent = '--'; $('#securityGrade').className = 'security-grade';
+  $('#runtimeVersion').textContent = '未读取'; $('#runtimeSummary').textContent = '登录后检查 Xray Core。'; $('#runtimeDetail').textContent = ''; $('#publicAddress').textContent = '未读取'; $('#publicAddressDetail').textContent = '';
+  $('#certStatus').textContent = '未读取'; $('#certStatus').className = 'cert-status';
+  $('#relayAgent').innerHTML = '<option value="">本机面板</option>'; $('#inboundAgent').innerHTML = '<option value="">本机面板 Xray</option>'; $('#importInboundAgent').innerHTML = '<option value="">本机面板 Xray</option>';
+  $('#userInbound').innerHTML = '<option value="">仅创建用户档案</option>'; $('#trafficUser').replaceChildren(); $('#trafficInbound').innerHTML = '<option value="">未指定入站</option>';
+  $('#relayModalTitle').textContent = '创建端口转发'; $('#inboundModalTitle').textContent = '生成入站节点'; $('#userModalTitle').textContent = '创建用户'; $('#qrTitle').textContent = '节点二维码'; $('#agentBootstrapTitle').textContent = '部署 Agent'; $('#agentDetailsTitle').textContent = 'Agent 详情';
+  $('#coreVersion').value = ''; $('#coreVersion').placeholder = '版本，如 v26.3.27'; $('#qrImage').removeAttribute('src'); $('#tlsForm').reset(); document.querySelectorAll('dialog form').forEach(form => form.reset());
+}
 
 async function api(url, options = {}) {
   const res = await fetch(url, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options });
   const payload = res.status === 204 ? null : await res.json().catch(() => ({}));
   if (!res.ok) {
     const error = new Error(payload.error || '请求失败'); error.status = res.status; error.code = payload.code || '';
-    if (res.status === 401) showLogin();
+    if (res.status === 401) { clearAuthenticatedState(); showLogin(url === '/api/auth/login' ? '' : '会话已失效，请重新登录。'); }
     if (error.code === 'PASSWORD_CHANGE_REQUIRED') forcePasswordChange();
     throw error;
   }
   return payload;
 }
-function showLogin(note = '') { $('#loginGate').classList.remove('hidden'); if (note) $('#loginNote').textContent = note; }
-function hideLogin() { $('#loginGate').classList.add('hidden'); }
+function showLogin(note = '') {
+  document.querySelectorAll('dialog[open]').forEach(dialog => dialog.close()); closeSidebar();
+  const gate = $('#loginGate'); gate.classList.remove('hidden'); gate.removeAttribute('aria-hidden'); setApplicationLocked(true);
+  $('#loginNote').textContent = note || loginDefaultNote;
+  const password = $('#loginForm input[name="password"]'); password?.focus({ preventScroll: true }); requestAnimationFrame(() => password?.focus({ preventScroll: true })); setTimeout(() => password?.focus({ preventScroll: true }), 50);
+}
+function hideLogin() { const gate = $('#loginGate'); gate.classList.add('hidden'); gate.setAttribute('aria-hidden', 'true'); setApplicationLocked(false); }
 function toast(message, type = 'info') {
   const item = document.createElement('div'); item.className = `toast ${type}`; item.textContent = message; $('#toastStack').appendChild(item); setTimeout(() => item.remove(), 4200);
 }
 function forcePasswordChange() {
   hideLogin(); const modal = $('#passwordModal'); modal.dataset.required = 'true'; $('#passwordRequirement').hidden = false;
-  if (!modal.open) modal.showModal(); modal.querySelector('input')?.focus();
+  if (!modal.open) { $('#passwordForm').reset(); modal.showModal(); } modal.querySelector('input')?.focus();
 }
 function formatBytes(value) {
   const bytes = Math.max(0, Number(value || 0));
@@ -47,6 +78,7 @@ function formatBytes(value) {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 function relayState(relay) { return relay.runtimeStatus || relay.status || 'stopped'; }
+function inboundDesiredState(inbound) { return inbound.desiredStatus || inbound.status || 'stopped'; }
 function renderRelays() {
   const search = $('#search').value.toLowerCase();
   const list = relays.filter(relay => { const state = relayState(relay); return (filter === 'all' || state === filter) && Object.values(relay).join(' ').toLowerCase().includes(search); });
@@ -69,6 +101,9 @@ function populateRelayAgents() {
 }function showDeployment(deployment, title = '部署 Agent') {
   if (!deployment?.command) return;
   $('#agentBootstrapTitle').textContent = title; $('#agentCommand').textContent = deployment.command; $('#agentBootstrapModal').showModal();
+}function resetImportedInboundEditor() {
+  const form = $('#inboundForm'), select = $('#inboundProtocol');
+  form?.removeAttribute('data-imported'); select?.removeAttribute('title'); select?.querySelector('option[data-imported-protocol]')?.remove();
 }function applyInboundTemplate(reset = false) {
   const form = $('#inboundForm'); const protocol = $('#inboundProtocol').value; const template = inboundTemplates[protocol] || inboundTemplates['VLESS + Reality'];
   $('#templateName').textContent = template.name; $('#templateDesc').textContent = template.desc;
@@ -83,12 +118,12 @@ function populateInboundAgents(selected = '') {
   select.innerHTML = '<option value="">本机面板 Xray</option>' + agents.filter(agent => agent.status !== 'disabled').map(agent => `<option value="${esc(agent.id)}">${esc(agent.name)} · ${agent.xrayAvailable ? 'Xray 可用' : '缺少 Xray'}</option>`).join(''); select.value = selected;
 }
 function renderInbounds() {
-  $('#inboundCards').innerHTML = inbounds.length ? inbounds.map(inbound => { const state = inbound.status || 'stopped'; const stateText = state === 'running' ? zh.run : state === 'starting' ? '下发中' : state === 'error' ? '异常' : state === 'offline' ? 'Agent 离线' : zh.stop; const executor = inbound.agentId ? `Agent · ${inbound.agentName || inbound.agentId}` : '本机 Xray'; return `<article class="node-card"><div class="inbound-title"><b>◈</b><div><strong>${esc(inbound.name)}</strong><small>${esc(inbound.template || inbound.protocol || inbound.protocolCode)} · ${esc(executor)}</small></div></div><div class="inbound-meta"><b>${zh.listen}</b>${esc(inbound.port)}</div><div class="inbound-meta"><b>${zh.server}</b>${esc(inbound.serverAddress || '-')}</div><div class="status ${esc(state)}">${stateText}<br><small title="${esc(inbound.lastError || '')}">${esc(inbound.lastError || `${zh.security}: ${inbound.security}`)}</small></div><div class="node-link wide"><b>${zh.link}</b><code>${esc(inbound.shareLink || '')}</code></div><div class="inbound-meta wide"><b>${zh.remark}</b>${esc(inbound.remark || zh.noRemark)}</div><details class="node-json wide"><summary>Xray JSON</summary><pre>${esc(JSON.stringify(inbound.xray || {}, null, 2))}</pre></details><div class="inbound-actions wide"><button class="btn" onclick="editInbound(${inbound.id})">编辑</button><button class="btn" onclick="showInboundQr(${inbound.id})">二维码</button><button class="btn" onclick="diagnoseInbound(${inbound.id})">修复并诊断</button><button class="btn" onclick="copyInbound(${inbound.id}, 'shareLink')">${zh.copyLink}</button><button class="btn" onclick="copyInbound(${inbound.id}, 'xray')">${zh.copyJson}</button><button class="btn" onclick="toggleInbound(${inbound.id})">${state === 'running' || state === 'starting' ? zh.pause : zh.enable}</button><button class="btn danger" onclick="deleteInbound(${inbound.id})">${zh.del}</button></div></article>`; }).join('') : `<article>${zh.emptyInbound}</article>`;
-  const running = inbounds.filter(inbound => inbound.status === 'running').length; $('#inboundCount').innerHTML = `${running} <small>/ ${inbounds.length}</small>`;
+  $('#inboundCards').innerHTML = inbounds.length ? inbounds.map(inbound => { const state = inbound.status || 'stopped', desired = inboundDesiredState(inbound); const stateText = state === 'running' ? zh.run : state === 'starting' ? '下发中' : state === 'error' ? '异常' : state === 'offline' ? 'Agent 离线' : zh.stop; const executor = inbound.agentId ? `Agent · ${inbound.agentName || inbound.agentId}` : '本机 Xray'; return `<article class="node-card"><div class="inbound-title"><b>◈</b><div><strong>${esc(inbound.name)}</strong><small>${esc(inbound.template || inbound.protocol || inbound.protocolCode)} · ${esc(executor)}</small></div></div><div class="inbound-meta"><b>${zh.listen}</b>${esc(inbound.port)}</div><div class="inbound-meta"><b>${zh.server}</b>${esc(inbound.serverAddress || '-')}</div><div class="status ${esc(state)}">${stateText}<br><small title="${esc(inbound.lastError || '')}">${esc(inbound.lastError || `${zh.security}: ${inbound.security}`)}</small></div><div class="node-link wide"><b>${zh.link}</b><code>${esc(inbound.shareLink || '')}</code></div><div class="inbound-meta wide"><b>${zh.remark}</b>${esc(inbound.remark || zh.noRemark)}</div><details class="node-json wide"><summary>Xray JSON</summary><pre>${esc(JSON.stringify(inbound.xray || {}, null, 2))}</pre></details><div class="inbound-actions wide"><button class="btn" onclick="editInbound(${inbound.id})">编辑</button><button class="btn" onclick="showInboundQr(${inbound.id})">二维码</button><button class="btn" onclick="diagnoseInbound(${inbound.id})">修复并诊断</button><button class="btn" onclick="copyInbound(${inbound.id}, 'shareLink')">${zh.copyLink}</button><button class="btn" onclick="copyInbound(${inbound.id}, 'xray')">${zh.copyJson}</button><button class="btn" onclick="toggleInbound(${inbound.id})">${desired === 'running' ? zh.pause : zh.enable}</button><button class="btn danger" onclick="deleteInbound(${inbound.id})">${zh.del}</button></div></article>`; }).join('') : `<article>${zh.emptyInbound}</article>`;
+  const running = inbounds.filter(inbound => inbound.status === 'running').length, enabled = inbounds.filter(inbound => inboundDesiredState(inbound) === 'running').length; $('#inboundCount').innerHTML = `${running} <small>在线 / ${enabled} 已启用 · 共 ${inbounds.length}</small>`;
 }function populateUserInbounds() {
   const select = $('#userInbound');
   if (!select) return;
-  select.innerHTML = '<option value="">仅创建用户档案</option>' + inbounds.filter(item => item.status === 'running').map(item => `<option value="${item.id}">${esc(item.name)} · ${esc(item.protocol)}</option>`).join('');
+  select.innerHTML = '<option value="">仅创建用户档案</option>' + inbounds.filter(item => inboundDesiredState(item) === 'running').map(item => `<option value="${item.id}">${esc(item.name)} · ${esc(item.protocol)}</option>`).join('');
 }
 function renderUsers() {
   $('#userCards').innerHTML = users.length ? users.map(user => {
@@ -117,7 +152,7 @@ function renderTraffic() {
 function populateTrafficOptions() {
   const userSelect = $('#trafficUser'), inboundSelect = $('#trafficInbound');
   userSelect.innerHTML = users.filter(item => item.status === 'running').map(item => `<option value="${item.id}">${esc(item.name)} · ${esc(item.email)}</option>`).join('') || '<option value="">没有可用用户</option>';
-  inboundSelect.innerHTML = '<option value="">未指定入站</option>' + inbounds.filter(item => item.status === 'running').map(item => `<option value="${item.id}">${esc(item.name)} · ${esc(item.protocol)}</option>`).join('');
+  inboundSelect.innerHTML = '<option value="">未指定入站</option>' + inbounds.filter(item => inboundDesiredState(item) === 'running').map(item => `<option value="${item.id}">${esc(item.name)} · ${esc(item.protocol)}</option>`).join('');
 }function auditResourceLabel(entry) {
   if (entry.action === 'auth.login') return '管理员登录'; if (entry.action === 'auth.logout') return '退出登录';
   const section = String(entry.resource || '').split('/')[2] || 'system'; const labels = { relays: '中转规则', inbounds: '入站节点', users: '用户', agents: 'Agent', traffic: '流量', runtime: 'Xray Core', system: '系统设置' };
@@ -151,12 +186,26 @@ function renderAudit() {
   $('#startRuntime').disabled = !runtime.available || runtime.running; $('#startRuntime').title = runtime.enabledInbounds ? '' : '当前没有启用的入站；仍可先启动 Core，新增入站后会自动重载。'; $('#stopRuntime').disabled = !runtime.running;
 }
 async function load() {
-  try {
-    const [relayData, inboundData, userData, agentData, config, trafficData, auditData] = await Promise.all([api('/api/relays'), api('/api/inbounds'), api('/api/users'), api('/api/agents'), api('/api/system'), api('/api/traffic'), api('/api/system/audit')]);
-    relays = relayData; inbounds = inboundData; users = userData; agents = agentData; systemInfo = config; traffic = trafficData; auditEntries = auditData.entries || []; renderRelays(); renderInbounds(); renderUsers(); renderAgents(); renderTraffic(); renderSystem(); renderAudit();
-  } catch (error) {
-    console.error(error); $('#cards').innerHTML = `<article>${zh.apiFailed}</article>`; $('#inboundCards').innerHTML = `<article>${zh.apiFailed}</article>`; $('#userCards').innerHTML = `<article>${zh.apiFailed}</article>`;
+  const [coreResults, optionalResults] = await Promise.all([
+    Promise.allSettled([api('/api/relays'), api('/api/inbounds'), api('/api/users'), api('/api/agents'), api('/api/traffic')]),
+    Promise.allSettled([api('/api/system'), api('/api/system/audit')])
+  ]);
+  if ([...coreResults, ...optionalResults].some(result => result.status === 'rejected' && result.reason?.status === 401)) return;
+  const coreFailure = coreResults.find(result => result.status === 'rejected');
+  if (coreFailure) {
+    console.error(coreFailure.reason); $('#cards').innerHTML = `<article>${zh.apiFailed}</article>`; $('#inboundCards').innerHTML = `<article>${zh.apiFailed}</article>`; $('#userCards').innerHTML = `<article>${zh.apiFailed}</article>`; $('#agentCards').innerHTML = `<article class="empty-state">${zh.apiFailed}</article>`;
+    return;
   }
+  const [relayData, inboundData, userData, agentData, trafficData] = coreResults.map(result => result.value);
+  relays = relayData; inbounds = inboundData; users = userData; agents = agentData; traffic = trafficData;
+  renderRelays(); renderInbounds(); renderUsers(); renderAgents(); renderTraffic();
+  const [systemResult, auditResult] = optionalResults;
+  if (systemResult.status === 'fulfilled') { systemInfo = systemResult.value; renderSystem(); }
+  else {
+    systemInfo = null; console.error(systemResult.reason); $('#securitySummary').textContent = '安全状态暂时不可用。'; $('#securityGrade').textContent = '--'; $('#securityGrade').className = 'security-grade warn'; $('#securityChecks').innerHTML = `<p class="empty-state">${zh.apiFailed}</p>`; $('#tlsSummary').textContent = '证书状态暂时不可用。'; $('#runtimeSummary').textContent = 'Xray 运行状态暂时不可用。';
+  }
+  if (auditResult.status === 'fulfilled') { auditEntries = auditResult.value.entries || []; renderAudit(); }
+  else { auditEntries = []; console.error(auditResult.reason); $('#auditLog').innerHTML = `<p class="empty-state">审计记录暂时不可用，其他管理功能不受影响。</p>`; }
 }
 async function patchStatus(type, id, status) { await api(`/api/${type}/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }); await load(); }
 async function copyText(value) {
@@ -167,8 +216,13 @@ async function copyText(value) {
 }
 window.editInbound = id => {
   const inbound = inbounds.find(item => item.id === id); if (!inbound) return;
-  editingInboundId = id; const form = $('#inboundForm'); form.reset(); populateInboundAgents(inbound.agentId || '');
-  $('#inboundProtocol').value = inbound.protocol; applyInboundTemplate(true);
+  editingInboundId = id; const form = $('#inboundForm'); resetImportedInboundEditor(); form.reset(); populateInboundAgents(inbound.agentId || '');
+  const protocolSelect = $('#inboundProtocol'), imported = /^3x-ui(?:\s|$)/i.test(String(inbound.template || ''));
+  if (imported) {
+    const option = document.createElement('option'); option.value = '__imported__'; option.textContent = `${inbound.protocol || inbound.protocolCode || '原始协议'}（3x-ui 导入，只读）`; option.dataset.importedProtocol = 'true'; protocolSelect.appendChild(option); protocolSelect.value = option.value; protocolSelect.title = '导入节点保留原始协议、客户端和传输配置'; form.dataset.imported = 'true';
+    form.querySelectorAll('[data-template]').forEach(label => { label.classList.add('template-hidden'); const control = label.querySelector('input,select'); if (control) control.disabled = true; });
+    $('#templateName').textContent = inbound.template || '3x-ui 兼容导入'; $('#templateDesc').textContent = '保留原始协议、客户端、传输与安全字段；此处仅修改名称、端口、连接地址、执行节点和备注。';
+  } else { protocolSelect.value = inbound.protocol; applyInboundTemplate(true); }
   const stream = inbound.streamSettings || {}, reality = stream.realitySettings || {}, realityMeta = reality.settings || {}, client = inbound.settings?.clients?.[0] || {}, ws = stream.wsSettings || {}, grpc = stream.grpcSettings || {}, certificate = stream.tlsSettings?.certificates?.[0] || {};
   const values = { name: inbound.name, port: inbound.port, serverAddress: inbound.serverAddress, sni: reality.serverNames?.[0] || stream.tlsSettings?.serverName || '', certPath: certificate.certificateFile || '', keyPath: certificate.keyFile || '', dest: reality.dest || '', fingerprint: realityMeta.fingerprint || 'chrome', flow: client.flow || 'xtls-rprx-vision', email: client.email || '', path: ws.path || '/vless', host: ws.headers?.Host || '', serviceName: grpc.serviceName || 'vless-grpc', method: inbound.settings?.method || '2022-blake3-aes-128-gcm', remark: inbound.remark || '' };
   Object.entries(values).forEach(([name, value]) => { if (form.elements[name]) form.elements[name].value = value; }); $('#inboundAgent').value = inbound.agentId || ''; $('#inboundProtocol').disabled = true;
@@ -188,7 +242,7 @@ window.editAgentController = async id => {
 window.requestAgentXrayInstall = async id => { const agent = agents.find(item => item.id === id); if (!agent || agent.xrayInstallPending) return; if (!confirm(`向 ${agent.name} 下发 Xray Core 自动安装？将下载官方 release、校验 SHA-256 并安装到该 Agent 私有目录。`)) return; try { const response = await api(`/api/agents/${encodeURIComponent(id)}/xray/install`, { method: 'POST', body: '{}' }); alert(response.message || 'Xray 安装任务已下发。'); await load(); } catch (error) { alert(error.message); } };window.requestAgentUpdate = async id => { const agent = agents.find(item => item.id === id); if (!agent || agent.updatePending) return; if (!confirm(`向 ${agent.name} 下发一键更新？Agent 会下载当前脚本并由 systemd 重启。`)) return; try { const response = await api(`/api/agents/${encodeURIComponent(id)}/update`, { method: 'POST', body: '{}' }); alert(response.message || '更新请求已下发。'); await load(); } catch (error) { alert(error.message); } };window.rotateAgentToken = async id => { if (!confirm('轮换令牌会使当前 Agent 在下一次心跳停止所有中转。需要重新部署后才能恢复，确定继续吗？')) return; try { const response = await api(`/api/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ rotateToken: true }) }); showDeployment(response.deployment, '令牌已轮换：重新部署 Agent'); await load(); } catch (error) { alert(error.message); } };window.deleteAgent = async id => { if (!confirm('删除该 Agent 后，它的令牌将立即失效。确定继续吗？')) return; try { await api(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }); await load(); } catch (error) { alert(error.message); } };window.toggleRelay = async id => { const item = relays.find(value => value.id === id); if (!item) return; try { await patchStatus('relays', id, item.status === 'running' ? 'stopped' : 'running'); } catch (error) { alert(error.message); } };
 window.editRelay = id => { const relay = relays.find(item => item.id === id); if (!relay || relayState(relay) === 'legacy') return; editingRelayId = id; const form = $('#form'); form.reset(); populateRelayAgents(); Object.entries({ name: relay.name, transport: relay.transport, listenPort: relay.listenPort, bindAddress: relay.bindAddress, agentId: relay.agentId || '', targetHost: relay.targetHost, targetPort: relay.targetPort, entry: relay.entry || '', exit: relay.exit || '' }).forEach(([name, value]) => { if (form.elements[name]) form.elements[name].value = value; }); $('#relayModalEyebrow').textContent = 'EDIT RELAY'; $('#relayModalTitle').textContent = `编辑中转：${relay.name}`; $('#relaySubmit').textContent = '保存并重载'; $('#modal').showModal(); };
 window.diagnoseRelay = async id => { try { const report = await api(`/api/relays/${id}/diagnose`, { method: 'POST', body: '{}' }); const icon = state => state === 'ok' ? '✓' : state === 'warning' ? '!' : '✗'; alert(`${report.ok ? '中转诊断完成' : '中转需要处理'}\n\n${report.checks.map(check => `${icon(check.status)} ${check.name}：${check.detail}`).join('\n')}`); await load(); } catch (error) { alert(error.message); } };window.deleteRelay = async id => { if (confirm(zh.confirmRelay)) try { await api(`/api/relays/${id}`, { method: 'DELETE' }); await load(); } catch (error) { alert(error.message); } };
-window.diagnoseInbound = async id => { const item = inbounds.find(value => value.id === id); if (!item) return; try { const report = await api(`/api/inbounds/${id}/diagnose`, { method: 'POST', body: JSON.stringify({ repair: true }) }); const icon = state => state === 'ok' ? '✓' : state === 'warning' ? '!' : '✗'; alert(`${report.ok ? '诊断完成' : '发现需要处理的问题'}\n\n${report.checks.map(check => `${icon(check.status)} ${check.name}：${check.detail}`).join('\n')}`); await load(); } catch (error) { alert(error.message); } };window.toggleInbound = async id => { const item = inbounds.find(value => value.id === id); if (!item) return; try { await patchStatus('inbounds', id, item.status === 'running' ? 'stopped' : 'running'); } catch (error) { alert(error.message); } };
+window.diagnoseInbound = async id => { const item = inbounds.find(value => value.id === id); if (!item) return; try { const report = await api(`/api/inbounds/${id}/diagnose`, { method: 'POST', body: JSON.stringify({ repair: true }) }); const icon = state => state === 'ok' ? '✓' : state === 'warning' ? '!' : '✗'; alert(`${report.ok ? '诊断完成' : '发现需要处理的问题'}\n\n${report.checks.map(check => `${icon(check.status)} ${check.name}：${check.detail}`).join('\n')}`); await load(); } catch (error) { alert(error.message); } };window.toggleInbound = async id => { const item = inbounds.find(value => value.id === id); if (!item) return; try { await patchStatus('inbounds', id, inboundDesiredState(item) === 'running' ? 'stopped' : 'running'); } catch (error) { alert(error.message); } };
 window.deleteInbound = async id => { if (confirm(zh.confirmInbound)) try { await api(`/api/inbounds/${id}`, { method: 'DELETE' }); await load(); } catch (error) { alert(error.message); } };
 window.copyUserLink = async id => { const user = users.find(item => item.id === id); const link = user?.access?.[0]?.link; if (!link) return; try { await copyText(link); } catch { prompt('节点链接', link); } };
 window.editUser = id => { const user = users.find(item => item.id === id); if (!user) return; editingUserId = id; const form = $('#userForm'); form.reset(); form.elements.name.value = user.name; form.elements.email.value = user.email; form.elements.limitGB.value = user.limitGB; form.elements.expire.value = user.expire || ''; form.elements.inboundId.value = ''; form.elements.name.disabled = true; form.elements.email.disabled = true; form.elements.inboundId.disabled = true; $('#userModalTitle').textContent = `编辑 ${user.name}`; $('#userSubmit').textContent = '保存用户设置'; $('#userModal').showModal(); };window.toggleUser = async id => { const item = users.find(value => value.id === id); if (!item) return; if (item.status !== 'running' && item.expire && new Date(`${item.expire}T23:59:59.999`) < new Date()) return window.editUser(id); try { await patchStatus('users', id, item.status === 'running' ? 'stopped' : 'running'); } catch (error) { alert(error.message); } };
@@ -210,12 +264,12 @@ $('#newRelay').onclick = () => { editingRelayId = null; const form = $('#form');
 $('#newAgent').onclick = () => { $('#agentControllerUrl').value = location.origin; $('#agentModal').showModal(); };$('#import3xuiInbound').onclick = () => { populateInboundAgents(); const select = $('#importInboundAgent'); select.innerHTML = $('#inboundAgent').innerHTML; const address = $('#import3xuiForm').elements.serverAddress; if (!address.value && systemInfo?.network?.publicAddress) address.value = systemInfo.network.publicAddress; $('#import3xuiModal').showModal(); };$('#newInbound').onclick = () => { editingInboundId = null; const form = $('#inboundForm'); form.reset(); $('#inboundProtocol').disabled = false; $('#inboundModalTitle').textContent = '生成入站节点'; $('#inboundSubmit').textContent = '生成节点'; populateInboundAgents(); applyInboundTemplate(true); const address = form.elements.serverAddress; if (address && !address.value && systemInfo?.network?.publicAddress) address.value = systemInfo.network.publicAddress; $('#inboundModal').showModal(); };
 $('#newUser').onclick = () => { editingUserId = null; const form = $('#userForm'); form.reset(); form.elements.name.disabled = false; form.elements.email.disabled = false; form.elements.inboundId.disabled = false; $('#userModalTitle').textContent = '创建用户'; $('#userSubmit').textContent = '创建并启用'; populateUserInbounds(); $('#userModal').showModal(); };
 $('#newTraffic').onclick = () => { populateTrafficOptions(); $('#trafficModal').showModal(); };
-$('#changePassword').onclick = () => { const modal = $('#passwordModal'); delete modal.dataset.required; $('#passwordRequirement').hidden = true; modal.showModal(); };
+$('#changePassword').onclick = () => { const modal = $('#passwordModal'); $('#passwordForm').reset(); delete modal.dataset.required; $('#passwordRequirement').hidden = true; modal.showModal(); };
 $('#openSystem').onclick = () => activatePage('system');
 $('#inboundProtocol').onchange = () => applyInboundTemplate(true);
 $('#inboundForm').addEventListener('input', event => { if (event.target.name) event.target.dataset.auto = '0'; });
 applyInboundTemplate(true);
-document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => button.closest('dialog').close());
+document.querySelectorAll('[data-close]').forEach(button => button.onclick = () => { const dialog = button.closest('dialog'); if (dialog?.id === 'passwordModal') $('#passwordForm').reset(); dialog?.close(); });
 function setFormBusy(form, busy) {
   const submit = form.querySelector('button:not([type="button"])'); form.dataset.busy = busy ? '1' : ''; form.toggleAttribute('aria-busy', busy);
   form.querySelectorAll('[data-close]').forEach(button => { button.disabled = busy; });
@@ -245,9 +299,11 @@ $('#stopRuntime').onclick = async () => { try { const runtime = await api('/api/
 $('#downloadConfig').onclick = async () => { try { const config = await api('/api/runtime/config'); const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'xray-config.json'; link.click(); URL.revokeObjectURL(url); } catch (error) { alert(error.message); } };
 $('#downloadBackup').onclick = async () => { try { const backup = await api('/api/system/backup'); const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `3xui-lite-backup-${new Date().toISOString().slice(0, 10)}.json`; link.click(); URL.revokeObjectURL(url); toast('完整配置备份已下载，请将文件存放在安全位置。', 'success'); } catch (error) { toast(error.message, 'error'); } };
 $('#refreshAudit').onclick = async () => { try { const data = await api('/api/system/audit'); auditEntries = data.entries || []; if (systemInfo?.security) systemInfo.security.auditEntries = auditEntries.length; renderAudit(); renderSystem(); toast('审计记录已刷新。', 'success'); } catch (error) { toast(error.message, 'error'); } };
-$('#passwordModal').addEventListener('cancel', event => { if ($('#passwordModal').dataset.required === 'true') event.preventDefault(); });
+$('#passwordModal').addEventListener('cancel', event => { if ($('#passwordModal').dataset.required === 'true') event.preventDefault(); else $('#passwordForm').reset(); });
+$('#passwordModal').addEventListener('close', () => $('#passwordForm').reset());
+$('#inboundModal').addEventListener('close', resetImportedInboundEditor);
 $('#loginForm').onsubmit = event => submitOnce(event, async form => { const data = Object.fromEntries(new FormData(form)); const response = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }); if (response.transportWarning) toast(response.transportWarning, 'error'); hideLogin(); form.reset(); if (response.mustChangePassword) return forcePasswordChange(); await load(); }, error => { $('#loginNote').textContent = error.message; });
-$('#logout').onclick = async () => { try { await api('/api/auth/logout', { method: 'POST' }); } finally { showLogin('已安全退出。'); } };
+$('#logout').onclick = async () => { const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 8000); try { await api('/api/auth/logout', { method: 'POST', signal: controller.signal }); clearAuthenticatedState(); showLogin('已安全退出。'); } catch (error) { if (error.status !== 401) toast(`退出失败：${error.name === 'AbortError' ? '请求超时' : error.message}。当前会话未确认失效。`, 'error'); } finally { clearTimeout(timeout); } };
 function setTheme(dark) {
   document.body.classList.toggle('dark', dark); const label = dark ? '切换到浅色主题' : '切换到深色主题'; $('#theme').setAttribute('aria-pressed', String(dark)); $('#theme').setAttribute('aria-label', label); $('#theme').title = label; $('#theme').textContent = dark ? '☾' : '☼';
   try { localStorage.setItem('3xui-theme', dark ? 'dark' : 'light'); } catch {}

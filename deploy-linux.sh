@@ -9,7 +9,7 @@ fi
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 install_node() {
-  if command_exists node; then
+  if command_exists node && command_exists npm; then
     local current
     current="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)"
     if [[ "${current}" -ge 18 ]]; then return; fi
@@ -50,6 +50,10 @@ APP_DIR="${APP_DIR:-/opt/3xui-lite-agent-panel}"
 SERVICE_NAME="${SERVICE_NAME:-3xui-lite-agent-panel}"
 install_node
 ensure_unzip
+if ! command_exists npm; then
+  echo "未找到 npm。请安装与 Node.js 配套的 npm 后重新运行。"
+  exit 1
+fi
 NODE_BIN="${NODE_BIN:-$(command -v node)}"
 NODE_MAJOR="$(${NODE_BIN} -p "process.versions.node.split('.')[0]")"
 if [[ "${NODE_MAJOR}" -lt 18 ]]; then
@@ -110,5 +114,6 @@ systemctl restart "${SERVICE_NAME}"
 systemctl --no-pager --full status "${SERVICE_NAME}"
 
 echo
-echo "安装完成。请访问：http://服务器IP:${PORT:-3000}"
+echo "安装完成。面板监听：${PANEL_HOST:-0.0.0.0}:${PORT:-3000}"
+echo "生产环境请仅允许管理 IP 或反向代理访问面板端口，并优先通过 HTTPS 访问。"
 echo "首次登录账号密码为 admin / admin；面板会强制修改密码后才允许管理操作。"

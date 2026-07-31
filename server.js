@@ -19,7 +19,7 @@ const runtimeFile = path.join(root, 'runtime-xray.json');
 const settingFile = path.join(root, 'settings.json');
 const auditFile = path.join(root, 'audit.json');
 const port = Number(process.env.PORT || 3000);
-const PANEL_VERSION = '0.7.0';
+const PANEL_VERSION = '0.7.1';
 const sessions = new Map();
 const loginAttempts = new Map();
 const runtime = { child: null, startedAt: '', lastError: '', lastLog: '', installing: false };
@@ -50,6 +50,10 @@ function usesDefaultPassword(admin) {
 function defaultSettings() {
   return { admin: { username: 'admin', ...passwordHash('admin'), mustChangePassword: true, defaultPassword: true, defaultPasswordChecked: true }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '' } };
 }
+function dataFileError(file, error, expected = '有效 JSON') {
+  const problem = new Error(`${path.basename(file)} 无法读取或不是${expected}；已保留原文件，请修复后重试`);
+  problem.code = 'DATA_FILE_INVALID'; problem.cause = error; return problem;
+}
 function readSettings() {
   try {
     const data = JSON.parse(fs.readFileSync(settingFile, 'utf8'));
@@ -59,7 +63,10 @@ function readSettings() {
       admin.defaultPassword = Boolean(admin.defaultPassword); admin.mustChangePassword = Boolean(admin.mustChangePassword || admin.defaultPassword);
       return { admin, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '', ...data.tls } };
     }
-  } catch {}
+    throw dataFileError(settingFile, new Error('管理员配置字段缺失'), '有效的设置 JSON');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error?.code === 'DATA_FILE_INVALID' ? error : dataFileError(settingFile, error, '有效的设置 JSON');
+  }
   const settings = defaultSettings();
   writeSettings(settings);
   return settings;
@@ -73,12 +80,23 @@ function writeSettings(settings) { writePrivateFile(settingFile, JSON.stringify(
 function readStore(file, fallback, normalizer) {
   try {
     const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return Array.isArray(data) ? (normalizer ? data.map(normalizer) : data) : fallback.map(item => ({ ...item }));
-  } catch { return fallback.map(item => ({ ...item })); }
+    if (!Array.isArray(data)) throw dataFileError(file, new Error('顶层值不是数组'), '有效的 JSON 数组');
+    return normalizer ? data.map(normalizer) : data;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return fallback.map(item => ({ ...item }));
+    throw error?.code === 'DATA_FILE_INVALID' ? error : dataFileError(file, error, '有效的 JSON 数组');
+  }
 }
 function writeStore(file, items) { writePrivateFile(file, JSON.stringify(items, null, 2)); }
 function readAudit(limit = 120) {
-  try { const entries = JSON.parse(fs.readFileSync(auditFile, 'utf8')); return Array.isArray(entries) ? entries.slice(0, Math.max(1, Math.min(Number(limit) || 120, 1000))) : []; } catch { return []; }
+  try {
+    const entries = JSON.parse(fs.readFileSync(auditFile, 'utf8'));
+    if (!Array.isArray(entries)) throw dataFileError(auditFile, new Error('顶层值不是数组'), '有效的 JSON 数组');
+    return entries.slice(0, Math.max(1, Math.min(Number(limit) || 120, 1000)));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error?.code === 'DATA_FILE_INVALID' ? error : dataFileError(auditFile, error, '有效的 JSON 数组');
+  }
 }
 function auditEvent(event) {
   try { const entries = readAudit(1000); entries.unshift({ id: id(), at: new Date().toISOString(), ...event }); writeStore(auditFile, entries.slice(0, 1000)); } catch (error) { console.error('Audit write failed:', error.message || error); }
@@ -96,21 +114,7 @@ function createBackup() {
   const checksum = crypto.createHash('sha256').update(JSON.stringify(data)).digest('hex');
   return { format: '3xui-lite-backup', schemaVersion: 1, panelVersion: PANEL_VERSION, exportedAt: new Date().toISOString(), checksum: 'sha256:' + checksum, containsSecrets: true, data };
 }
-function removeLegacyDemoData() {
-  const remove = (file, predicate) => {
-    try {
-      const items = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (!Array.isArray(items)) return;
-      const kept = items.filter(item => !predicate(item));
-      if (kept.length !== items.length) writeStore(file, kept);
-    } catch {}
-  };
-  remove(relayFile, item => ['Tokyo BGP', 'Hong Kong Express', 'Frankfurt Backup'].includes(item?.name));
-  remove(inboundFile, item => ['VLESS Reality Demo', 'Trojan TLS Demo', 'Shadowsocks Demo'].includes(item?.name));
-  remove(userFile, item => ['demo@example.com', 'trial@example.com'].includes(String(item?.email || '').toLowerCase()));
-  remove(trafficFile, item => [201, 202].includes(Number(item?.userId)));
-}
-removeLegacyDemoData();
+
 function alignInboundWith3xui(inbound) {
   if (!inbound || typeof inbound !== 'object') return false;
   let changed = false; const settings = inbound.settings || {}; const stream = inbound.streamSettings || {}; const sniffing = inbound.sniffing || {};
@@ -129,7 +133,8 @@ function alignInboundWith3xui(inbound) {
   return changed;
 }
 function migrateInboundCompatibility() {
-  try { const items = JSON.parse(fs.readFileSync(inboundFile, 'utf8')); if (!Array.isArray(items)) return; if (items.some(alignInboundWith3xui)) writeStore(inboundFile, items); } catch {}
+  try { const items = JSON.parse(fs.readFileSync(inboundFile, 'utf8')); if (!Array.isArray(items)) throw dataFileError(inboundFile, new Error('顶层值不是数组'), '有效的 JSON 数组'); if (items.some(alignInboundWith3xui)) writeStore(inboundFile, items); }
+  catch (error) { if (error?.code !== 'ENOENT') throw error?.code === 'DATA_FILE_INVALID' ? error : dataFileError(inboundFile, error, '有效的 JSON 数组'); }
 }
 migrateInboundCompatibility();
 function json(res, code, payload, headers = {}) {
@@ -148,8 +153,11 @@ function body(req) {
     });
     req.on('end', () => {
       if (settled) return;
-      try { const parsed = raw ? JSON.parse(raw) : {}; settled = true; resolve(parsed); }
-      catch { fail(requestError('请求 JSON 格式无效', 400)); }
+      try {
+        const parsed = raw ? JSON.parse(raw) : {};
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || Object.getPrototypeOf(parsed) !== Object.prototype) throw requestError('请求 JSON 必须是对象', 400);
+        settled = true; resolve(parsed);
+      } catch (error) { fail(error?.statusCode ? error : requestError('请求 JSON 格式无效', 400)); }
     });
     req.on('error', error => fail(error));
   });
@@ -179,13 +187,17 @@ function requestOriginAllowed(req) {
   try { const parsed = new URL(origin); const protocol = requestIsSecure(req) ? 'https:' : 'http:'; return parsed.protocol === protocol && parsed.host === expectedHost; } catch { return false; }
 }
 function sessionCookie(req, value, seconds = 0) {
-  const secure = process.env.SECURE_COOKIE === 'true' ? '; Secure' : '';
+  const secure = process.env.SECURE_COOKIE === 'true' || requestIsSecure(req) ? '; Secure' : '';
   return `session=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${seconds}${secure}`;
 }
 function requireAuth(req, res) {
   const session = currentSession(req); if (session) return session;
   json(res, 401, { error: '请先登录管理员账号' });
   return null;
+}
+function auditOnFinish(req, res, session, action = 'admin.request', resource = '') {
+  if (!session) return;
+  res.once('finish', () => auditEvent({ actor: session.username, action, resource: resource || new URL(req.url, 'http://localhost').pathname, method: req.method, outcome: res.statusCode < 400 ? 'success' : 'denied', status: res.statusCode, ip: clientAddress(req), userAgent: cleanText(req.headers['user-agent'], '', 180) }));
 }
 function shortId() { return crypto.randomBytes(8).toString('hex'); }
 function x25519Pair() {
@@ -201,7 +213,7 @@ function activeTlsSettings() {
 function makeVlessReality(input, nodeId, status) {
   const clientId = crypto.randomUUID(); const keys = x25519Pair(); const sid = shortId();
   const sni = cleanText(input.sni, 'www.microsoft.com'); const dest = cleanText(input.dest, `${sni}:443`);
-  const fingerprint = cleanText(input.fingerprint, 'chrome'); const flow = cleanText(input.flow, 'xtls-rprx-vision'); const email = cleanText(input.email, `client-${nodeId}`);
+  const fingerprint = cleanText(input.fingerprint, 'chrome'); const flow = typeof input.flow === 'string' ? cleanText(input.flow, '', 128) : 'xtls-rprx-vision'; const email = cleanText(input.email, `client-${nodeId}`);
   const settings = { clients: [{ id: clientId, email, flow }], decryption: 'none', fallbacks: [] };
   const streamSettings = { network: 'tcp', security: 'reality', tcpSettings: { header: { type: 'none' } }, realitySettings: { show: false, dest, xver: 0, serverNames: [sni], privateKey: keys.privateKey, minClientVer: '', maxClientVer: '', maxTimeDiff: 0, shortIds: [sid], settings: { publicKey: keys.publicKey, fingerprint, serverName: '', spiderX: '/' } } };
   const shareLink = `vless://${clientId}@${input.serverAddress}:${input.port}?type=tcp&encryption=none&security=reality&pbk=${keys.publicKey}&fp=${fingerprint}&sni=${encodeURIComponent(sni)}&sid=${sid}&spx=%2F&flow=${flow}#${shareName(input.name)}`;
@@ -250,7 +262,8 @@ function makeVlessGrpc(input, nodeId, status) {
   const shareLink = `trojan://${password}@${input.serverAddress}:${input.port}?security=tls&type=tcp&sni=${encodeURIComponent(sni)}#${shareName(input.name)}`;
   return finishInbound(input, nodeId, status, 'trojan', 'TLS', settings, streamSettings, shareLink);
 }
-function ss2022Key(method) { return crypto.randomBytes(method === '2022-blake3-aes-128-gcm' ? 16 : 32).toString('base64'); }
+function ss2022KeyBytes(method) { return method === '2022-blake3-aes-128-gcm' ? 16 : 32; }
+function ss2022Key(method) { return crypto.randomBytes(ss2022KeyBytes(method)).toString('base64'); }
 function makeShadowsocks(input, nodeId, status) {
   const requestedMethod = cleanText(input.method, '2022-blake3-aes-128-gcm'); const method = ss2022Methods.has(requestedMethod) ? requestedMethod : '2022-blake3-aes-128-gcm';
   const serverPassword = ss2022Key(method); const userPassword = ss2022Key(method); const email = cleanText(input.email, `client-${nodeId}`);
@@ -266,7 +279,7 @@ function finishInbound(input, nodeId, status, protocolCode, security, settings, 
 function buildNode(data, forcedId = id(), forcedStatus = 'running') {
   const listenPort = Number(data.port); const protocolKey = protocolMap[data.protocol] || 'vless-reality'; const protocolLabel = protocolLabels[protocolKey];
   if (!validText(data.name) || !validText(data.serverAddress) || !Number.isInteger(listenPort) || listenPort < 1 || listenPort > 65535) return null;
-  const input = { ...data, id: forcedId, agentId: cleanText(data.agentId, '', 80), name: data.name.trim(), protocolKey, protocol: protocolLabel, port: listenPort, serverAddress: data.serverAddress.trim(), certPath: cleanText(data.certPath, '', 512), keyPath: cleanText(data.keyPath, '', 512), remark: cleanText(data.remark, '', 180), sni: cleanText(data.sni, '', 180), dest: cleanText(data.dest, '', 180), fingerprint: cleanText(data.fingerprint, 'chrome'), flow: cleanText(data.flow, 'xtls-rprx-vision'), path: cleanText(data.path, '/vless', 180), host: cleanText(data.host, '', 180), serviceName: cleanText(data.serviceName, 'vless-grpc', 120), method: cleanText(data.method, '2022-blake3-aes-128-gcm'), email: cleanText(data.email, '', 100), templateName: templateNames[protocolKey] };
+  const input = { ...data, id: forcedId, agentId: cleanText(data.agentId, '', 80), name: data.name.trim(), protocolKey, protocol: protocolLabel, port: listenPort, serverAddress: data.serverAddress.trim(), certPath: cleanText(data.certPath, '', 512), keyPath: cleanText(data.keyPath, '', 512), remark: cleanText(data.remark, '', 180), sni: cleanText(data.sni, '', 180), dest: cleanText(data.dest, '', 180), fingerprint: cleanText(data.fingerprint, 'chrome'), flow: typeof data.flow === 'string' ? cleanText(data.flow, '', 128) : 'xtls-rprx-vision', path: cleanText(data.path, '/vless', 180), host: cleanText(data.host, '', 180), serviceName: cleanText(data.serviceName, 'vless-grpc', 120), method: cleanText(data.method, '2022-blake3-aes-128-gcm'), email: cleanText(data.email, '', 100), templateName: templateNames[protocolKey] };
   if (protocolKey === 'vless') return makeVless(input, forcedId, forcedStatus);
   if (protocolKey === 'vless-tls') return makeVlessTls(input, forcedId, forcedStatus);
   if (protocolKey === 'vless-ws') return makeVlessWs(input, forcedId, forcedStatus);
@@ -284,7 +297,7 @@ function vlessTransportShareLink(clientId, address, port, name, stream) {
 function shareLinkForInbound(inbound) {
   const settings = inbound.settings || {}; const stream = inbound.streamSettings || {}; const client = settings.clients?.[0] || {}; const address = inbound.serverAddress; const port = inbound.port;
   if (inbound.protocolCode === 'vless') {
-    if (inbound.security === 'Reality') { const reality = stream.realitySettings || {}; const config = reality.settings || {}; const sni = reality.serverNames?.[0] || ''; const sid = reality.shortIds?.[0] || ''; const flow = client.flow || 'xtls-rprx-vision'; return `vless://${client.id}@${address}:${port}?type=tcp&encryption=none&security=reality&pbk=${config.publicKey || ''}&fp=${config.fingerprint || 'chrome'}&sni=${encodeURIComponent(sni)}&sid=${sid}&spx=%2F&flow=${flow}#${shareName(inbound.name)}`; }
+    if (inbound.security === 'Reality') { const reality = stream.realitySettings || {}; const config = reality.settings || {}; const sni = reality.serverNames?.[0] || ''; const sid = reality.shortIds?.[0] || ''; const flow = client.flow ?? 'xtls-rprx-vision'; return `vless://${client.id}@${address}:${port}?type=tcp&encryption=none&security=reality&pbk=${config.publicKey || ''}&fp=${config.fingerprint || 'chrome'}&sni=${encodeURIComponent(sni)}&sid=${sid}&spx=%2F&flow=${flow}#${shareName(inbound.name)}`; }
     return vlessTransportShareLink(client.id, address, port, inbound.name, stream);
   }
   if (inbound.protocolCode === 'trojan') { const tls = stream.security === 'tls'; const sniQuery = tls ? `&sni=${encodeURIComponent(stream.tlsSettings?.serverName || address)}` : ''; return `trojan://${client.password}@${address}:${port}?security=${tls ? 'tls' : 'none'}&type=tcp${sniQuery}#${shareName(inbound.name)}`; }
@@ -332,14 +345,29 @@ function import3xuiInbound(data) {
   alignInboundWith3xui(inbound); inbound.template = `3x-ui ${protocol} 兼容配置`; inbound.shareLink = shareLinkForInbound(inbound);
   if (!inbound.shareLink) throw new Error('导入配置无法生成客户端链接，请确认客户端字段完整');
   return inbound;
+}function importedInboundUpdate(existing, data) {
+  const name = data.name === undefined ? existing.name : cleanText(data.name, '', 120); const serverAddress = data.serverAddress === undefined ? existing.serverAddress : cleanText(data.serverAddress, '', 255); const port = data.port === undefined ? Number(existing.port) : Number(data.port);
+  if (!validText(name, 120) || !validText(serverAddress, 255) || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  const candidate = JSON.parse(JSON.stringify(existing)); candidate.name = name; candidate.serverAddress = serverAddress; candidate.port = port;
+  if (data.agentId !== undefined) candidate.agentId = cleanText(data.agentId, '', 80);
+  if (data.remark !== undefined) candidate.remark = cleanText(data.remark, '', 180);
+  if (candidate.xray && typeof candidate.xray === 'object') candidate.xray.port = port;
+  candidate.shareLink = shareLinkForInbound(candidate);
+  return candidate.shareLink ? candidate : null;
 }function updateInbound(existing, data) {
   if (data.protocol && data.protocol !== existing.protocol) throw new Error('编辑节点时不能切换协议；请新建节点。');
-  const candidate = buildNode({ ...data, protocol: existing.protocol }, existing.id, existing.status);
+  if (/^3x-ui(?:\s|$)/i.test(String(existing.template || ''))) return importedInboundUpdate(existing, data);
+  const currentStream = existing.streamSettings || {}, currentReality = currentStream.realitySettings || {}, currentTls = currentStream.tlsSettings || {}, currentCertificate = currentTls.certificates?.[0] || {}, currentClient = existing.settings?.clients?.[0] || {};
+  const merged = { name: existing.name, port: existing.port, serverAddress: existing.serverAddress, agentId: existing.agentId || '', remark: existing.remark || '', sni: currentReality.serverNames?.[0] || currentTls.serverName || '', dest: currentReality.dest || '', fingerprint: currentReality.settings?.fingerprint || 'chrome', flow: currentClient.flow ?? 'xtls-rprx-vision', email: currentClient.email || '', certPath: currentCertificate.certificateFile || '', keyPath: currentCertificate.keyFile || '', path: currentStream.wsSettings?.path || '/vless', host: currentStream.wsSettings?.headers?.Host || '', serviceName: currentStream.grpcSettings?.serviceName || 'vless-grpc', method: existing.settings?.method || '2022-blake3-aes-128-gcm', ...data, protocol: existing.protocol };
+  const candidate = buildNode(merged, existing.id, existing.status);
   if (!candidate) return null;
+  const generatedPrimaryEmail = candidate.settings?.clients?.[0]?.email;
   candidate.settings = JSON.parse(JSON.stringify(existing.settings || candidate.settings));
   candidate.streamSettings = JSON.parse(JSON.stringify(existing.streamSettings || candidate.streamSettings));
-  if (candidate.security === 'Reality') { const generated = buildNode({ ...data, protocol: existing.protocol }, existing.id, existing.status); const oldReality = candidate.streamSettings.realitySettings || {}; const nextReality = generated.streamSettings.realitySettings || {}; oldReality.dest = nextReality.dest; oldReality.serverNames = nextReality.serverNames; oldReality.settings = { ...(oldReality.settings || {}), fingerprint: nextReality.settings?.fingerprint || 'chrome', serverName: nextReality.settings?.serverName || '' }; candidate.streamSettings.realitySettings = oldReality; }
-  if (candidate.streamSettings.security === 'tls') { const generated = buildNode({ ...data, protocol: existing.protocol }, existing.id, existing.status); candidate.streamSettings.tlsSettings = { ...(candidate.streamSettings.tlsSettings || {}), serverName: generated.streamSettings.tlsSettings?.serverName || candidate.serverAddress, ...(generated.streamSettings.tlsSettings?.certificates ? { certificates: generated.streamSettings.tlsSettings.certificates } : {}) }; if (candidate.streamSettings.network === 'ws') candidate.streamSettings.wsSettings = generated.streamSettings.wsSettings; if (candidate.streamSettings.network === 'grpc') candidate.streamSettings.grpcSettings = generated.streamSettings.grpcSettings; }
+  if (Object.prototype.hasOwnProperty.call(data, 'email') && candidate.settings.clients?.[0] && generatedPrimaryEmail) candidate.settings.clients[0].email = generatedPrimaryEmail;
+  if (candidate.security === 'Reality') { const generated = buildNode(merged, existing.id, existing.status); const oldReality = candidate.streamSettings.realitySettings || {}; const nextReality = generated.streamSettings.realitySettings || {}; const nextFlow = Object.prototype.hasOwnProperty.call(data, 'flow') && typeof data.flow === 'string' ? cleanText(data.flow, '', 128) : (currentClient.flow ?? 'xtls-rprx-vision'); oldReality.dest = nextReality.dest; oldReality.serverNames = nextReality.serverNames; oldReality.settings = { ...(oldReality.settings || {}), fingerprint: nextReality.settings?.fingerprint || 'chrome', serverName: nextReality.settings?.serverName || '' }; candidate.streamSettings.realitySettings = oldReality; for (const client of candidate.settings.clients || []) client.flow = nextFlow; }
+  if (candidate.streamSettings.security === 'tls') { const generated = buildNode(merged, existing.id, existing.status); candidate.streamSettings.tlsSettings = { ...(candidate.streamSettings.tlsSettings || {}), serverName: generated.streamSettings.tlsSettings?.serverName || candidate.serverAddress, ...(generated.streamSettings.tlsSettings?.certificates ? { certificates: generated.streamSettings.tlsSettings.certificates } : {}) }; if (candidate.streamSettings.network === 'ws') candidate.streamSettings.wsSettings = generated.streamSettings.wsSettings; if (candidate.streamSettings.network === 'grpc') candidate.streamSettings.grpcSettings = generated.streamSettings.grpcSettings; }
+  if (candidate.protocolCode === 'shadowsocks') { const generated = buildNode(merged, existing.id, existing.status); const currentMethod = candidate.settings.method; const nextMethod = generated.settings.method; if (currentMethod !== nextMethod && ss2022KeyBytes(currentMethod) !== ss2022KeyBytes(nextMethod)) throw new Error('该 Shadowsocks 方法需要不同长度的密钥；为避免静默轮换客户端凭据，请新建节点'); candidate.settings.method = nextMethod; }
   candidate.xray = { ...candidate.xray, settings: candidate.settings, streamSettings: candidate.streamSettings };
   candidate.shareLink = shareLinkForInbound(candidate);
   return candidate;
@@ -350,25 +378,44 @@ function normalizeInbound(item) {
   return buildNode({ name: item.name || item.remark || `Inbound ${item.port || ''}`, protocol: protocols.has(item.protocol) ? item.protocol : 'VLESS + Reality', port: item.port, serverAddress: item.serverAddress || 'example.com', sni: item.sni || 'www.microsoft.com', dest: item.dest || 'www.microsoft.com:443', remark: item.remark || '' }, item.id || id(), item.status || 'running') || item;
 }
 function accessClientKey(protocolCode) { return protocolCode === 'vless' ? 'id' : 'password'; }
-function userAccessForInbound(inbound, user) {
-  const email = user.email; const shareLabel = `${inbound.name}-${user.name}`;
-  if (inbound.protocolCode === 'vless') {
-    const client = { id: crypto.randomUUID(), email }; const stream = inbound.streamSettings || {}; let link;
+function accessLinkForInbound(inbound, client, shareLabel) {
+  if (!client) return '';
+  const stream = inbound.streamSettings || {};
+  if (inbound.protocolCode === 'vless' && client.id) {
     if (inbound.security === 'Reality') {
-      client.flow = inbound.settings.clients?.[0]?.flow || 'xtls-rprx-vision'; const reality = stream.realitySettings || {}; const sni = reality.serverNames?.[0] || ''; const sid = reality.shortIds?.[0] || ''; const config = reality.settings || {};
-      link = `vless://${client.id}@${inbound.serverAddress}:${inbound.port}?type=tcp&encryption=none&security=reality&pbk=${config.publicKey || ''}&fp=${config.fingerprint || 'chrome'}&sni=${encodeURIComponent(sni)}&sid=${sid}&spx=%2F&flow=${client.flow}#${shareName(shareLabel)}`;
-    } else link = vlessTransportShareLink(client.id, inbound.serverAddress, inbound.port, shareLabel, stream);
-    return { inboundId: inbound.id, protocol: inbound.protocol, protocolCode: inbound.protocolCode, client, link };
+      const reality = stream.realitySettings || {}; const sni = reality.serverNames?.[0] || ''; const sid = reality.shortIds?.[0] || ''; const config = reality.settings || {}; const flow = client.flow ?? inbound.settings.clients?.[0]?.flow ?? 'xtls-rprx-vision';
+      return `vless://${client.id}@${inbound.serverAddress}:${inbound.port}?type=tcp&encryption=none&security=reality&pbk=${config.publicKey || ''}&fp=${config.fingerprint || 'chrome'}&sni=${encodeURIComponent(sni)}&sid=${sid}&spx=%2F&flow=${flow}#${shareName(shareLabel)}`;
+    }
+    return vlessTransportShareLink(client.id, inbound.serverAddress, inbound.port, shareLabel, stream);
   }
-  if (inbound.protocolCode === 'trojan') {
-    const client = { password: token(18), email }; const stream = inbound.streamSettings || {}; const tls = stream.security === 'tls'; const sniQuery = tls ? `&sni=${encodeURIComponent(stream.tlsSettings?.serverName || inbound.serverAddress)}` : '';
-    return { inboundId: inbound.id, protocol: inbound.protocol, protocolCode: inbound.protocolCode, client, link: `trojan://${client.password}@${inbound.serverAddress}:${inbound.port}?security=${tls ? 'tls' : 'none'}&type=tcp${sniQuery}#${shareName(shareLabel)}` };
+  if (inbound.protocolCode === 'trojan' && client.password) {
+    const tls = stream.security === 'tls'; const sniQuery = tls ? `&sni=${encodeURIComponent(stream.tlsSettings?.serverName || inbound.serverAddress)}` : '';
+    return `trojan://${client.password}@${inbound.serverAddress}:${inbound.port}?security=${tls ? 'tls' : 'none'}&type=tcp${sniQuery}#${shareName(shareLabel)}`;
   }
-  if (inbound.protocolCode === 'shadowsocks') {
-    const method = inbound.settings.method; const client = { password: ss2022Key(method), email, level: 0 }; const credentials = Buffer.from(`${method}:${inbound.settings.password}:${client.password}`).toString('base64url');
-    return { inboundId: inbound.id, protocol: inbound.protocol, protocolCode: inbound.protocolCode, client, link: `ss://${credentials}@${inbound.serverAddress}:${inbound.port}#${shareName(shareLabel)}` };
+  if (inbound.protocolCode === 'shadowsocks' && client.password) {
+    const method = inbound.settings.method; const credentials = Buffer.from(`${method}:${inbound.settings.password}:${client.password}`).toString('base64url');
+    return `ss://${credentials}@${inbound.serverAddress}:${inbound.port}#${shareName(shareLabel)}`;
   }
-  return null;
+  return '';
+}
+function userAccessForInbound(inbound, user) {
+  const email = user.email; let client;
+  if (inbound.protocolCode === 'vless') { client = { id: crypto.randomUUID(), email }; if (inbound.security === 'Reality') client.flow = inbound.settings.clients?.[0]?.flow ?? 'xtls-rprx-vision'; }
+  else if (inbound.protocolCode === 'trojan') client = { password: token(18), email };
+  else if (inbound.protocolCode === 'shadowsocks') client = { password: ss2022Key(inbound.settings.method), email, level: 0 };
+  if (!client) return null;
+  const link = accessLinkForInbound(inbound, client, `${inbound.name}-${user.name}`); if (!link) return null;
+  return { inboundId: inbound.id, protocol: inbound.protocol, protocolCode: inbound.protocolCode, client, link };
+}
+function refreshUserAccessLinks(inbound) {
+  const users = readStore(userFile, seedUsers); let changed = false;
+  for (const user of users) for (const access of user.access || []) {
+    if (access.inboundId !== inbound.id) continue;
+    if (inbound.security === 'Reality' && access.client) { const flow = inbound.settings.clients?.[0]?.flow ?? 'xtls-rprx-vision'; if (access.client.flow !== flow) { access.client.flow = flow; changed = true; } }
+    const link = accessLinkForInbound(inbound, access.client, `${inbound.name}-${user.name}`); if (!link) continue;
+    if (access.link !== link || access.protocol !== inbound.protocol || access.protocolCode !== inbound.protocolCode) { access.link = link; access.protocol = inbound.protocol; access.protocolCode = inbound.protocolCode; changed = true; }
+  }
+  if (changed) writeStore(userFile, users); return changed;
 }function setAccessActive(inbound, access, active) {
   if (!inbound?.settings?.clients || !access?.client) return;
   const key = accessClientKey(inbound.protocolCode); const exists = inbound.settings.clients.some(item => item[key] === access.client[key]);
@@ -392,8 +439,9 @@ function createUser(data) {
   if (!validText(data.name) || !validText(data.email, 100)) return null;
   const email = data.email.trim().toLowerCase(); const expire = normalizeExpire(data.expire);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || expire === null || (expire && userExpired({ expire }))) return null;
-  const limitGB = Number(data.limitGB || 100);
-  return { id: id(), name: data.name.trim(), email, limitGB: Number.isFinite(limitGB) && limitGB > 0 ? Math.round(limitGB) : 100, usedGB: 0, expire, status: 'running', createdAt: new Date().toISOString(), access: [] };
+  const limitGB = data.limitGB === undefined ? 100 : Number(data.limitGB);
+  if (!Number.isFinite(limitGB) || limitGB <= 0) return null;
+  return { id: id(), name: data.name.trim(), email, limitGB: Math.round(limitGB * 1000) / 1000, usedGB: 0, expire, status: 'running', createdAt: new Date().toISOString(), access: [] };
 }
 function controllerUrl(value) {
   try { const url = new URL(String(value || '')); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return ''; return url.toString().replace(/\/$/, ''); } catch { return ''; }
@@ -414,11 +462,12 @@ function agentPublic(agent) { const { token: hidden, updateRequestId: hiddenUpda
 function secureTokenMatch(expected, actual) { if (typeof actual !== 'string' || expected.length !== actual.length) return false; return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual)); }
 function agentServiceName(agent) { return `3xui-lite-agent-${agent.id}`; }
 function agentInstallScript(agent) {
-  const serviceName = agentServiceName(agent); const installDir = `/opt/${serviceName}`; const serviceFile = `/etc/systemd/system/${serviceName}.service`;
+  const serviceName = agentServiceName(agent); const installDir = `/opt/${serviceName}`; const serviceFile = `/etc/systemd/system/${serviceName}.service`; const environmentFile = `${installDir}/agent.env`; const environmentPayload = Buffer.from(`AGENT_CONTROLLER=${agent.controllerUrl}\nAGENT_ID=${agent.id}\nAGENT_TOKEN=${agent.token}\n`).toString('base64');
   return `#!/usr/bin/env bash
 set -euo pipefail
 install_dir=${JSON.stringify(installDir)}
 service_file=${JSON.stringify(serviceFile)}
+environment_file=${JSON.stringify(environmentFile)}
 install_node() {
   if command -v node >/dev/null 2>&1 && [ "$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)" -ge 18 ]; then return; fi
   echo "正在安装 Node.js 20 LTS..."
@@ -432,6 +481,8 @@ install_node
 if ! command -v curl >/dev/null 2>&1; then echo "缺少 curl，无法下载 Agent 脚本。"; exit 1; fi
 mkdir -p "$install_dir"
 curl -fsSL ${JSON.stringify(`${agent.controllerUrl}/agent.js`)} -o "$install_dir/agent.js"
+printf '%s' ${JSON.stringify(environmentPayload)} | base64 -d > "$environment_file"
+chmod 600 "$environment_file"
 cat > "$service_file" <<'UNIT'
 [Unit]
 Description=3xUI Lite Agent (${agent.name.replace(/[\r\n]/g, ' ')})
@@ -441,7 +492,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=${installDir}
-ExecStart=/usr/bin/env node ${installDir}/agent.js --controller ${agent.controllerUrl} --id ${agent.id} --token ${agent.token}
+EnvironmentFile=${environmentFile}
+ExecStart=/usr/bin/env node ${installDir}/agent.js
 Restart=always
 RestartSec=5
 RestartPreventExitStatus=1
@@ -485,7 +537,7 @@ async function handleAgentGateway(req, res, parts) {
   if (parts.length === 2 && req.method === 'POST') { const agent = createAgent(await body(req)); if (!agent) return json(res, 400, { error: '请填写机器名称和可被远程访问的控制面板地址（HTTP/HTTPS）' }); const agents = readAgents(); agents.unshift(agent); writeStore(agentFile, agents); return json(res, 201, { agent: agentPublic(agent), deployment: { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } }); }
   const patchData = req.method === 'PATCH' ? await body(req) : null; const agents = readAgents(); const agent = agents.find(item => item.id === agentId); if (!agent) return json(res, 404, { error: 'Not found' });
   if (parts.length === 5 && parts[3] === 'xray' && parts[4] === 'install' && req.method === 'POST') { agent.xrayInstallRequestId = token(12); agent.xrayInstallRequestedAt = new Date().toISOString(); agent.xrayInstallError = ''; agent.updatedAt = agent.xrayInstallRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发 Xray Core 安装任务，等待 Agent 执行。' }); }  if (parts.length === 4 && parts[3] === 'update' && req.method === 'POST') { agent.updateRequestId = token(12); agent.updateRequestedAt = new Date().toISOString(); agent.updatedAt = agent.updateRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发更新请求，等待 Agent 心跳执行。' }); }
-  if (parts.length === 4 && parts[3] === 'bootstrap' && req.method === 'GET') return json(res, 200, { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token });
+  if (parts.length === 4 && parts[3] === 'bootstrap' && req.method === 'GET') { auditOnFinish(req, res, currentSession(req), 'admin.agent.bootstrap.read', `/api/agents/${agent.id}/bootstrap`); return json(res, 200, { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token }); }
   if (req.method === 'PATCH') { const data = patchData; if (data.enabled !== undefined) agent.enabled = Boolean(data.enabled); if (data.controllerUrl !== undefined) { const target = controllerUrl(data.controllerUrl); if (!target) return json(res, 400, { error: '控制面板地址必须是有效的 HTTP/HTTPS 地址' }); agent.controllerUrl = target; } if (data.name !== undefined) { const name = cleanText(data.name, '', 80); if (!name) return json(res, 400, { error: '机器名称不能为空' }); agent.name = name; } if (data.rotateToken === true) agent.token = token(32); agent.updatedAt = new Date().toISOString(); writeStore(agentFile, agents); return json(res, 200, { agent: agentPublic(agent), deployment: (data.rotateToken === true || data.controllerUrl !== undefined) ? { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } : undefined }); }
   if (req.method === 'DELETE') { const assignedInbounds = readStore(inboundFile, seedInbounds, normalizeInbound).filter(item => item.agentId === agentId); const assignedRelays = readStore(relayFile, seedRelays, normalizeRelay).filter(item => item.agentId === agentId); if (assignedInbounds.length || assignedRelays.length) return json(res, 409, { error: '该 Agent 仍承载 ' + assignedInbounds.length + ' 个入站和 ' + assignedRelays.length + ' 条中转，请先迁移或删除这些资源' }); writeStore(agentFile, agents.filter(item => item.id !== agentId)); return json(res, 204); }
   return json(res, 405, { error: 'Method not allowed' });
@@ -605,6 +657,13 @@ function createRelay(data) {
 }
 function updateRelay(existing, data) { const candidate = createRelay({ ...existing, ...data }); return candidate ? { ...candidate, id: existing.id, status: existing.status, createdAt: existing.createdAt, updatedAt: new Date().toISOString() } : null; }
 function relayPortConflict(relays, candidate, ignoredId = null) { const usesTcp = mode => mode === 'tcp' || mode === 'tcp+udp'; const usesUdp = mode => mode === 'udp' || mode === 'tcp+udp'; return relays.some(item => item.id !== ignoredId && (item.agentId || '') === candidate.agentId && item.listenPort === candidate.listenPort && ((usesTcp(item.transport) && usesTcp(candidate.transport)) || (usesUdp(item.transport) && usesUdp(candidate.transport)))); }
+function executionPortConflicts(inbounds, relays, agentId, port, ignored = {}) {
+  const scope = String(agentId || ''); const targetPort = Number(port);
+  return {
+    inbound: inbounds.some(item => item.id !== ignored.inboundId && String(item.agentId || '') === scope && Number(item.port) === targetPort),
+    relay: relays.some(item => item.id !== ignored.relayId && String(item.agentId || '') === scope && Number(item.listenPort) === targetPort)
+  };
+}
 async function activateRelayRule(relay) { if (relay.agentId) { relay.runtimeStatus = 'starting'; relay.lastError = ''; return; } try { const snapshot = await startRelay(relay); Object.assign(relay, snapshot, { status: 'running', lastError: '' }); } catch (error) { relay.status = 'stopped'; relay.runtimeStatus = 'error'; relay.lastError = error.message || '监听端口失败'; } }
 function persistRelayState(relay, expectedUpdatedAt = relay.updatedAt) {
   const relays = readStore(relayFile, seedRelays, normalizeRelay); const index = relays.findIndex(item => item.id === relay.id);
@@ -618,14 +677,18 @@ async function handleAuth(req, res, pathname) {
     return json(res, 200, { authenticated: Boolean(session), username: session?.username || '', mustChangePassword: Boolean(session && settings.admin.mustChangePassword) });
   }
   if (pathname === '/api/auth/login' && req.method === 'POST') {
-    const remote = clientAddress(req); const now = Date.now(); pruneLoginAttempts(now); const attempt = loginAttempts.get(remote);
-    if (attempt && attempt.until > now) { auditEvent({ actor: 'anonymous', action: 'auth.login', resource: '/api/auth/login', outcome: 'blocked', status: 429, ip: clientAddress(req) }); return json(res, 429, { error: '登录尝试过多，请 15 分钟后再试' }); }
-    const data = await body(req); const settings = readSettings();
+    const remote = clientAddress(req); let now = Date.now(); pruneLoginAttempts(now); let attempt = loginAttempts.get(remote);
+    if (attempt && attempt.until > now) { auditEvent({ actor: 'anonymous', action: 'auth.login', resource: '/api/auth/login', outcome: 'blocked', status: 429, ip: remote }); return json(res, 429, { error: '登录尝试过多，请 15 分钟后再试' }); }
+    const data = await body(req);
+    now = Date.now(); pruneLoginAttempts(now); attempt = loginAttempts.get(remote);
+    if (attempt && attempt.until > now) { auditEvent({ actor: 'anonymous', action: 'auth.login', resource: '/api/auth/login', outcome: 'blocked', status: 429, ip: remote }); return json(res, 429, { error: '登录尝试过多，请 15 分钟后再试' }); }
+    const settings = readSettings();
     const valid = cleanText(data.username, '', 64) === settings.admin.username && typeof data.password === 'string' && crypto.timingSafeEqual(Buffer.from(passwordHash(data.password, settings.admin.salt).hash), Buffer.from(settings.admin.hash));
     if (!valid) {
-      const count = (attempt && now - attempt.startedAt < 15 * 60 * 1000 ? attempt.count : 0) + 1;
-      loginAttempts.set(remote, { count, startedAt: attempt?.startedAt || now, until: count >= 5 ? now + 15 * 60 * 1000 : 0 });
-      auditEvent({ actor: cleanText(data.username, 'unknown', 64), action: 'auth.login', resource: '/api/auth/login', outcome: 'denied', status: 401, ip: clientAddress(req) });
+      const current = loginAttempts.get(remote); const inWindow = current && now - current.startedAt < 15 * 60 * 1000;
+      const count = (inWindow ? current.count : 0) + 1; const startedAt = inWindow ? current.startedAt : now;
+      loginAttempts.set(remote, { count, startedAt, until: count >= 5 ? now + 15 * 60 * 1000 : 0 });
+      auditEvent({ actor: cleanText(data.username, 'unknown', 64), action: 'auth.login', resource: '/api/auth/login', outcome: 'denied', status: 401, ip: remote });
       return json(res, 401, { error: '用户名或密码错误' });
     }
     loginAttempts.delete(remote); auditEvent({ actor: settings.admin.username, action: 'auth.login', resource: '/api/auth/login', outcome: 'success', status: 200, ip: clientAddress(req) });
@@ -659,7 +722,8 @@ async function handleRelays(req, res, parts) {
   if (parts.length === 2 && req.method === 'GET') return json(res, 200, readStore(relayFile, seedRelays, normalizeRelay).map(relaySnapshot));
   if (parts.length === 2 && req.method === 'POST') {
     const relay = createRelay(await body(req)); if (!relay) return json(res, 400, { error: '请填写规则名称、协议、监听端口与目标地址' }); const agents = readAgents();
-    if (relay.agentId && !agents.some(agent => agent.id === relay.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const relays = readStore(relayFile, seedRelays, normalizeRelay);
+    if (relay.agentId && !agents.some(agent => agent.id === relay.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const relays = readStore(relayFile, seedRelays, normalizeRelay); const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound);
+    const conflicts = executionPortConflicts(inbounds, relays, relay.agentId, relay.listenPort); if (conflicts.inbound) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' });
     if (relayPortConflict(relays, relay)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' }); relays.unshift(relay); writeStore(relayFile, relays); await activateRelayRule(relay); if (!persistRelayState(relay) && !relay.agentId) stopRelay(relay.id); return json(res, 201, relaySnapshot(relay));
   }
   if (!Number.isInteger(relayId)) return json(res, 404, { error: 'Not found' });
@@ -668,6 +732,7 @@ async function handleRelays(req, res, parts) {
     const data = await body(req); const relays = readStore(relayFile, seedRelays, normalizeRelay); const index = relays.findIndex(item => item.id === relayId); if (index < 0) return json(res, 404, { error: 'Not found' }); const relay = relays[index];
     if (Object.keys(data).length === 1 && Object.prototype.hasOwnProperty.call(data, 'status')) {
       if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' });
+      if (data.status === 'running') { const conflicts = executionPortConflicts(readStore(inboundFile, seedInbounds, normalizeInbound), relays, relay.agentId, relay.listenPort, { relayId }); if (conflicts.inbound) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); if (relayPortConflict(relays, relay, relayId)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' }); }
       relay.status = data.status; relay.updatedAt = new Date().toISOString();
       if (relay.agentId) { relay.runtimeStatus = data.status === 'running' ? 'starting' : 'stopped'; relay.lastError = ''; }
       else if (data.status === 'stopped') { stopRelay(relay.id); relay.runtimeStatus = 'stopped'; relay.lastError = ''; }
@@ -676,7 +741,7 @@ async function handleRelays(req, res, parts) {
       return json(res, 200, relaySnapshot(relay));
     }
     const updated = updateRelay(relay, data); if (!updated) return json(res, 400, { error: '规则名称、协议、监听端口与目标地址必须有效' }); const agents = readAgents();
-    if (updated.agentId && !agents.some(agent => agent.id === updated.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); if (relayPortConflict(relays, updated, relayId)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' });
+    if (updated.agentId && !agents.some(agent => agent.id === updated.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const conflicts = executionPortConflicts(readStore(inboundFile, seedInbounds, normalizeInbound), relays, updated.agentId, updated.listenPort, { relayId }); if (conflicts.inbound) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); if (relayPortConflict(relays, updated, relayId)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' });
     if (!relay.agentId) stopRelay(relay.id); relays[index] = updated; writeStore(relayFile, relays); if (updated.status === 'running') { await activateRelayRule(updated); if (!persistRelayState(updated) && !updated.agentId) stopRelay(updated.id); } return json(res, 200, relaySnapshot(updated));
   }
   if (req.method === 'DELETE') { const relays = readStore(relayFile, seedRelays, normalizeRelay); const relay = relays.find(item => item.id === relayId); if (!relay) return json(res, 404, { error: 'Not found' }); if (!relay.agentId) stopRelay(relayId); writeStore(relayFile, relays.filter(item => item.id !== relayId)); return json(res, 204); }
@@ -695,25 +760,24 @@ async function handleRelays(req, res, parts) {
   if (parts.length === 3 && parts[2] === 'import-3xui' && req.method === 'POST') {
     let inbound; try { inbound = import3xuiInbound(await body(req)); } catch (error) { return json(res, 400, { error: error.message }); }
     const agents = readAgents(); if (inbound.agentId && !agents.some(agent => agent.id === inbound.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const tlsError = inboundTlsError(inbound); if (inbound.status === 'running' && tlsError) return json(res, 400, { error: tlsError });
-    const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const scope = item => (item.agentId || '') === inbound.agentId;
-    if (inbounds.some(item => scope(item) && item.port === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' });
-    const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === inbound.agentId && relay.listenPort === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
+    const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const relays = readStore(relayFile, seedRelays, normalizeRelay); const conflicts = executionPortConflicts(inbounds, relays, inbound.agentId, inbound.port);
+    if (conflicts.inbound) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' });
+    if (conflicts.relay) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
     inbounds.unshift(inbound); writeStore(inboundFile, inbounds); if (!inbound.agentId && inbound.status === 'running') await ensureLocalRuntime(); return json(res, 201, inboundSnapshot(inbound));
   }
   if (parts.length === 2 && req.method === 'POST') {
     const inbound = buildNode(await body(req)); if (!inbound) return json(res, 400, { error: '节点名称、地址和端口必须有效' }); const agents = readAgents(); if (inbound.agentId && !agents.some(agent => agent.id === inbound.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const tlsError = inboundTlsError(inbound); if (inbound.status === 'running' && tlsError) return json(res, 400, { error: tlsError });
-    const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const scope = item => (item.agentId || '') === inbound.agentId; if (inbounds.some(item => scope(item) && item.port === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === inbound.agentId && relay.listenPort === inbound.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
+    const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const relays = readStore(relayFile, seedRelays, normalizeRelay); const conflicts = executionPortConflicts(inbounds, relays, inbound.agentId, inbound.port); if (conflicts.inbound) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); if (conflicts.relay) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
     inbounds.unshift(inbound); writeStore(inboundFile, inbounds); if (!inbound.agentId) await ensureLocalRuntime(); return json(res, 201, inboundSnapshot(inbound));
   }
   if (!Number.isInteger(inboundId)) return json(res, 404, { error: 'Not found' });
   if (req.method === 'PATCH') {
     const data = await body(req); const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const index = inbounds.findIndex(item => item.id === inboundId); if (index < 0) return json(res, 404, { error: 'Not found' }); const inbound = inbounds[index];
-    if (Object.prototype.hasOwnProperty.call(data, 'status') && Object.keys(data).length === 1) { if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' }); const tlsError = data.status === 'running' ? inboundTlsError(inbound) : ''; if (tlsError) return json(res, 400, { error: tlsError }); inbound.status = data.status; writeStore(inboundFile, inbounds); if (!inbound.agentId) { if (inbound.status === 'running') await ensureLocalRuntime(); else await syncRuntimeIfRunning(); } return json(res, 200, inboundSnapshot(inbound)); }
+    if (Object.prototype.hasOwnProperty.call(data, 'status') && Object.keys(data).length === 1) { if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' }); const tlsError = data.status === 'running' ? inboundTlsError(inbound) : ''; if (tlsError) return json(res, 400, { error: tlsError }); if (data.status === 'running') { const conflicts = executionPortConflicts(inbounds, readStore(relayFile, seedRelays, normalizeRelay), inbound.agentId, inbound.port, { inboundId }); if (conflicts.inbound) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); if (conflicts.relay) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' }); } inbound.status = data.status; writeStore(inboundFile, inbounds); if (!inbound.agentId) { if (inbound.status === 'running') await ensureLocalRuntime(); else await syncRuntimeIfRunning(); } return json(res, 200, inboundSnapshot(inbound)); }
     let updated; try { updated = updateInbound(inbound, data); } catch (error) { return json(res, 400, { error: error.message }); } if (!updated) return json(res, 400, { error: '节点名称、地址和端口必须有效' }); const tlsError = inboundTlsError(updated); if (updated.status === 'running' && tlsError) return json(res, 400, { error: tlsError });
     const agents = readAgents(); if (updated.agentId && !agents.some(agent => agent.id === updated.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' });
-    if (inbounds.some(item => item.id !== inboundId && (item.agentId || '') === updated.agentId && item.port === updated.port)) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' });
-    const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === updated.agentId && relay.listenPort === updated.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
-    inbounds[index] = updated; writeStore(inboundFile, inbounds); if (!inbound.agentId || !updated.agentId) { if (!updated.agentId && updated.status === 'running') await ensureLocalRuntime(); else await syncRuntimeIfRunning(); } return json(res, 200, inboundSnapshot(updated));
+    const relays = readStore(relayFile, seedRelays, normalizeRelay); const conflicts = executionPortConflicts(inbounds, relays, updated.agentId, updated.port, { inboundId }); if (conflicts.inbound) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); if (conflicts.relay) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
+    inbounds[index] = updated; writeStore(inboundFile, inbounds); refreshUserAccessLinks(updated); if (!inbound.agentId || !updated.agentId) { if (!updated.agentId && updated.status === 'running') await ensureLocalRuntime(); else await syncRuntimeIfRunning(); } return json(res, 200, inboundSnapshot(updated));
   }
   if (req.method === 'DELETE') { const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const inbound = inbounds.find(item => item.id === inboundId); if (!inbound) return json(res, 404, { error: 'Not found' }); const assignedUsers = readStore(userFile, seedUsers).filter(user => (user.access || []).some(access => access.inboundId === inboundId)); if (assignedUsers.length) return json(res, 409, { error: '该入站仍分配给 ' + assignedUsers.length + ' 个用户，请先删除或迁移这些用户' }); writeStore(inboundFile, inbounds.filter(item => item.id !== inboundId)); if (!inbound.agentId) await syncRuntimeIfRunning(); return json(res, 204); }
   return json(res, 405, { error: 'Method not allowed' });
@@ -739,7 +803,7 @@ async function handleRelays(req, res, parts) {
     const expire = data.expire === undefined ? user.expire : normalizeExpire(data.expire); if (expire === null) return json(res, 400, { error: '到期日期格式无效，请使用 YYYY-MM-DD' });
     if (data.status !== undefined && !statuses.has(data.status)) return json(res, 400, { error: '状态无效' });
     if (data.status === 'running' && userExpired({ expire })) return json(res, 400, { error: '到期用户不能重新启用，请先设置未来的到期日期' });
-    user.expire = expire; if (data.limitGB !== undefined) { const limit = Number(data.limitGB); if (!Number.isFinite(limit) || limit <= 0) return json(res, 400, { error: '配额无效' }); user.limitGB = Math.round(limit); }
+    user.expire = expire; if (data.limitGB !== undefined) { const limit = Number(data.limitGB); if (!Number.isFinite(limit) || limit <= 0) return json(res, 400, { error: '配额无效' }); user.limitGB = Math.round(limit * 1000) / 1000; }
     const expired = userExpired(user); if (data.status !== undefined) user.status = data.status; if (expired) user.status = 'stopped';
     writeStore(userFile, users);
     if (data.status !== undefined || expired) { const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); for (const access of user.access || []) setAccessActive(inbounds.find(item => item.id === access.inboundId), access, user.status === 'running'); writeStore(inboundFile, inbounds); const localEnabled = user.status === 'running' && (user.access || []).some(access => { const inbound = inbounds.find(item => item.id === access.inboundId); return inbound && !inbound.agentId && inbound.status === 'running'; }); if (localEnabled) await ensureLocalRuntime(); else await syncRuntimeIfRunning(); }
@@ -769,7 +833,7 @@ async function handleTraffic(req, res, parts) {
     const inboundId = Number(data.inboundId); const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const inbound = inboundId ? inbounds.find(item => item.id === inboundId) : null;
     if (inboundId && !inbound) return json(res, 404, { error: '入站不存在' });
     user.usedGB = Math.round((Number(user.usedGB || 0) + gb) * 1000) / 1000;
-    const reachedLimit = user.usedGB >= Number(user.limitGB || Infinity);
+    const limitGB = Number(user.limitGB); const reachedLimit = Number.isFinite(limitGB) && user.usedGB >= limitGB;
     if (reachedLimit) { user.status = 'stopped'; for (const access of user.access || []) setAccessActive(inbounds.find(item => item.id === access.inboundId), access, false); writeStore(inboundFile, inbounds); }
     writeStore(userFile, users); if (reachedLimit) await syncRuntimeIfRunning();
     const records = readStore(trafficFile, []); const record = { id: id(), userId: user.id, userName: user.name, inboundId: inbound?.id || null, inboundName: inbound?.name || '未指定入站', gb: Math.round(gb * 1000) / 1000, direction, at: new Date().toISOString(), source: 'manual' };
@@ -808,13 +872,13 @@ function runtimeInfo() {
 function appendRuntimeLog(value) { runtime.lastLog = `${runtime.lastLog}${String(value || '')}`.slice(-1500); }
 function startRuntime() {
   const probe = xrayProbe(); if (!probe.available) return { error: probe.error };
-  if (runtime.child && runtime.child.exitCode === null && !runtime.child.killed) return { info: runtimeInfo() };
+  if (runtime.child && runtime.child.exitCode === null) return runtime.child.killed ? { error: 'Xray Core 正在停止，请稍后重试' } : { info: runtimeInfo() };
   const config = runtimeConfig(); const validation = validateRuntimeConfig(config); if (!validation.ok) { runtime.lastError = validation.error; return { error: validation.error }; }
   writeStore(runtimeFile, config); runtime.lastError = ''; runtime.lastLog = '';
   const child = spawn(probe.binary, ['run', '-c', runtimeFile], { cwd: root, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }); runtime.child = child; runtime.startedAt = new Date().toISOString();
   child.stdout.on('data', appendRuntimeLog); child.stderr.on('data', appendRuntimeLog);
-  child.on('error', error => { runtime.lastError = error.message; });
-  child.on('exit', (code, signal) => { if (code && code !== 0) runtime.lastError = `Xray 已退出（code ${code}${signal ? `, ${signal}` : ''}）`; runtime.child = null; });
+  child.on('error', error => { if (runtime.child === child) runtime.lastError = error.message; });
+  child.on('exit', (code, signal) => { if (runtime.child !== child) return; if (code && code !== 0) runtime.lastError = `Xray 已退出（code ${code}${signal ? `, ${signal}` : ''}）`; runtime.child = null; });
   return { info: runtimeInfo() };
 }
 function stopRuntime() { if (!runtime.child || runtime.child.exitCode !== null || runtime.child.killed) return false; runtime.child.kill(); return true; }
@@ -825,7 +889,12 @@ function validateRuntimeConfig(config) {
   catch (error) { return { ok: false, error: error.message || 'Xray 配置校验失败' }; }
   finally { try { fs.unlinkSync(file); } catch {} }
 }
-function waitForExit(child) { return new Promise(resolve => { if (!child || child.exitCode !== null) return resolve(); const timer = setTimeout(resolve, 3000); child.once('exit', () => { clearTimeout(timer); resolve(); }); }); }
+function waitForExit(child) {
+  if (!child || child.exitCode !== null) return Promise.resolve(true);
+  return new Promise(resolve => {
+    let settled = false; const finish = exited => { if (settled) return; settled = true; clearTimeout(timer); child.removeListener('exit', onExit); resolve(exited); }; const onExit = () => finish(true); const timer = setTimeout(() => finish(false), 3000); child.once('exit', onExit);
+  });
+}
 async function ensureLocalRuntime() {
   const info = runtimeInfo(); if (!info.available) return { error: info.error || '未检测到 Xray Core' };
   if (info.running) return syncRuntimeIfRunning();
@@ -836,7 +905,7 @@ async function ensureLocalRuntime() {
 async function syncRuntimeIfRunning() {
   const active = Boolean(runtime.child && runtime.child.exitCode === null && !runtime.child.killed); if (!active) return { reloaded: false };
   const config = runtimeConfig(); const check = validateRuntimeConfig(config); if (!check.ok) { runtime.lastError = `新配置未应用：${check.error}`; return { error: runtime.lastError }; }
-  const previous = runtime.child; stopRuntime(); await waitForExit(previous); const started = startRuntime(); if (started.error) { runtime.lastError = started.error; return { error: started.error }; }
+  const previous = runtime.child; if (!stopRuntime()) { runtime.lastError = 'Xray Core 停止请求失败，新配置未应用'; return { error: runtime.lastError }; } const exited = await waitForExit(previous); if (!exited) { runtime.lastError = 'Xray Core 在 3 秒内未退出，新配置未应用'; return { error: runtime.lastError }; } const started = startRuntime(); if (started.error) { runtime.lastError = started.error; return { error: started.error }; }
   await new Promise(resolve => setTimeout(resolve, 350)); if (!runtime.child || runtime.child.exitCode !== null || runtime.child.killed) return { error: runtime.lastError || 'Xray 重载后未保持运行' };
   runtime.lastLog = `配置已自动重载\n${runtime.lastLog}`.slice(-1500); return { reloaded: true };
 }
@@ -917,9 +986,9 @@ async function installXray() {
   if (parts.length === 3 && parts[2] === 'stop' && req.method === 'POST') { stopRuntime(); return json(res, 200, runtimeInfo()); }
   return json(res, 405, { error: 'Method not allowed' });
 }async function handleSystem(req, res, pathname) {
-  if (pathname === '/api/system' && req.method === 'GET') { const settings = readSettings(); return json(res, 200, { panelVersion: PANEL_VERSION, admin: { username: settings.admin.username, mustChangePassword: settings.admin.mustChangePassword }, tls: tlsPublic(settings), certbotAvailable: certbotExists(), runtime: runtimeInfo(), network: networkInfo(), security: { transportSecure: requestIsSecure(req), secureCookie: process.env.SECURE_COOKIE === 'true', trustProxy: process.env.TRUST_PROXY === 'true', defaultPassword: settings.admin.defaultPassword === true, mustChangePassword: settings.admin.mustChangePassword === true, auditEntries: readAudit(1000).length } }); }
+  if (pathname === '/api/system' && req.method === 'GET') { const settings = readSettings(); return json(res, 200, { panelVersion: PANEL_VERSION, admin: { username: settings.admin.username, mustChangePassword: settings.admin.mustChangePassword }, tls: tlsPublic(settings), certbotAvailable: certbotExists(), runtime: runtimeInfo(), network: networkInfo(), security: { transportSecure: requestIsSecure(req), secureCookie: process.env.SECURE_COOKIE === 'true' || requestIsSecure(req), trustProxy: process.env.TRUST_PROXY === 'true', defaultPassword: settings.admin.defaultPassword === true, mustChangePassword: settings.admin.mustChangePassword === true, auditEntries: readAudit(1000).length } }); }
   if (pathname === '/api/system/audit' && req.method === 'GET') return json(res, 200, { entries: readAudit(200) });
-  if (pathname === '/api/system/backup' && req.method === 'GET') { const backup = createBackup(); const date = new Date().toISOString().slice(0, 10); return json(res, 200, backup, { 'Content-Disposition': 'attachment; filename=3xui-lite-backup-' + date + '.json' }); }
+  if (pathname === '/api/system/backup' && req.method === 'GET') { auditOnFinish(req, res, currentSession(req), 'admin.backup.export', pathname); const backup = createBackup(); const date = new Date().toISOString().slice(0, 10); return json(res, 200, backup, { 'Content-Disposition': 'attachment; filename=3xui-lite-backup-' + date + '.json' }); }
   if (pathname === '/api/system/network' && req.method === 'GET') return json(res, 200, networkInfo());
   if (pathname === '/api/system/network/detect' && req.method === 'POST') return json(res, 200, await detectPublicAddress(true));  if (pathname === '/api/system/password' && req.method === 'POST') {
     const data = await body(req); const settings = readSettings(); const candidate = typeof data.currentPassword === 'string' ? passwordHash(data.currentPassword, settings.admin.salt).hash : '';
@@ -962,7 +1031,7 @@ async function requestHandler(req, res) {
     if (parts[0] === 'api' && parts[1] === 'agent') { await reconcileExpiredUsers(); return handleAgentGateway(req, res, parts); }
     if (parts[0] === 'api') {
       const session = requireAuth(req, res); if (!session) return;
-      if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) res.once('finish', () => auditEvent({ actor: session.username, action: 'admin.request', resource: url.pathname, method: req.method, outcome: res.statusCode < 400 ? 'success' : 'denied', status: res.statusCode, ip: clientAddress(req), userAgent: cleanText(req.headers['user-agent'], '', 180) }));
+      if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) auditOnFinish(req, res, session, 'admin.request', url.pathname);
       const settings = readSettings(); if (settings.admin.mustChangePassword && url.pathname !== '/api/system/password') return json(res, 403, { error: '首次使用必须先修改默认管理员密码', code: 'PASSWORD_CHANGE_REQUIRED' });
       await reconcileExpiredUsers();
       if (parts[1] === 'relays') return handleRelays(req, res, parts);

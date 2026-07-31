@@ -24,14 +24,20 @@ sudo systemctl status 3xui-lite-agent-panel
 sudo journalctl -u 3xui-lite-agent-panel -f
 ```
 
-## 外网访问检查
+## 管理入口与防火墙
 
-面板默认监听 `0.0.0.0:3000`。若服务器本机访问正常而浏览器超时，请在云平台安全组中放行 TCP `3000` 端口，并检查系统防火墙。可执行：
+面板默认监听 `0.0.0.0:3000`，仅应在云平台安全组和系统防火墙已限制管理来源时使用。生产环境优先通过 HTTPS 反向代理访问，并将 `PANEL_HOST` 设置为 `127.0.0.1`。若服务器本机访问正常而浏览器超时，可先执行：
 
 ```bash
 sudo ss -lntp | grep :3000
 curl http://127.0.0.1:3000/api/health
-sudo ufw allow 3000/tcp  # 使用 UFW 时
+sudo ufw allow from 203.0.113.10/32 to any port 3000 proto tcp
+```
+
+请将示例地址替换为管理员出口公网 IP，并在云安全组中设置相同的来源限制；禁止将 HTTP 管理端口向 `0.0.0.0/0` 开放。HTTPS 反向代理部署示例：
+
+```bash
+sudo PANEL_HOST=127.0.0.1 SECURE_COOKIE=true TRUST_PROXY=true bash ./deploy-linux.sh
 ```
 
 安装时设置其他端口：
