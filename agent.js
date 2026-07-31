@@ -9,7 +9,7 @@ const dgram = require('node:dgram');
 const http = require('node:http');
 const https = require('node:https');
 
-const AGENT_VERSION = '0.5.3';
+const AGENT_VERSION = '0.5.4';
 function option(name, fallback = '') { const index = process.argv.indexOf(`--${name}`); return index >= 0 ? (process.argv[index + 1] || '') : (process.env[`AGENT_${name.toUpperCase()}`] || fallback); }
 const controller = option('controller').replace(/\/$/, '');
 const agentStartedAt = new Date().toISOString();
