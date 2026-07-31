@@ -46,7 +46,7 @@ sudo PORT=8443 bash ./deploy-linux.sh
 
 ## 安全建议
 
-- 立即修改初始 `admin / admin` 账号密码。
+- 首次登录使用 `admin / admin`；面板会强制修改默认密码后才开放其他管理功能。
 - 面板公开访问前请配置 HTTPS。
 - 防火墙只开放面板端口，以及明确启用的节点和中转端口。
-- 运行时数据（`settings.json`、节点和用户数据、Agent 令牌）会被刻意排除在源码包和仓库之外。
+- 运行时数据（`settings.json`、`audit.json`、节点和用户数据、Agent 令牌）会被刻意排除在源码包和仓库之外。

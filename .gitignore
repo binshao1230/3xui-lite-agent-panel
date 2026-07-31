@@ -12,3 +12,4 @@ agent-xray-config.json
 agent-xray-config.json.next
 *.log
 .env
+audit.json

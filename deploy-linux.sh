@@ -61,7 +61,7 @@ install -d -m 0750 "${APP_DIR}"
 tar -C "${SOURCE_DIR}" \
   --exclude=.git --exclude=node_modules --exclude=runtime --exclude=release \
   --exclude=settings.json --exclude=users.json --exclude=inbounds.json --exclude=relays.json \
-  --exclude=agents.json --exclude=traffic.json --exclude=runtime-xray.json --exclude=agent-xray-config.json \
+  --exclude=agents.json --exclude=traffic.json --exclude=audit.json --exclude=runtime-xray.json --exclude=agent-xray-config.json \
   -cf - . | tar -C "${APP_DIR}" -xf -
 
 cd "${APP_DIR}"
@@ -90,6 +90,15 @@ PrivateTmp=true
 ProtectHome=true
 ProtectKernelTunables=true
 NoNewPrivileges=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=65536
+TasksMax=512
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
@@ -102,4 +111,4 @@ systemctl --no-pager --full status "${SERVICE_NAME}"
 
 echo
 echo "安装完成。请访问：http://服务器IP:${PORT:-3000}"
-echo "首次登录账号密码为 admin / admin；请立即修改密码。"
+echo "首次登录账号密码为 admin / admin；面板会强制修改密码后才允许管理操作。"

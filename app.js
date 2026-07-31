@@ -14,7 +14,7 @@ const inboundTemplates = {
   'VLESS + gRPC': { key: 'grpc', name: 'VLESS gRPC + TLS 模板', desc: 'gRPC + TLS，自动使用 serviceName；适合 HTTP/2 反向代理场景。', defaults: { port: '443', sni: '', serviceName: 'vless-grpc' } },  'Trojan + TLS': { key: 'tls', name: 'Trojan TLS 模板', desc: 'TCP + TLS，自动生成 Trojan 密码和 trojan:// 链接；远程 Agent 需填写证书路径。', defaults: { port: '443', sni: '', fingerprint: 'chrome' } },
   Shadowsocks: { key: 'ss', name: 'Shadowsocks 2022 模板', desc: 'TCP/UDP SS2022，自动生成服务端 PSK、用户 PSK 和 ss:// 链接。', defaults: { port: '8388', method: '2022-blake3-aes-128-gcm' } }
 };
-let relays = [], inbounds = [], users = [], agents = [], filter = 'all', systemInfo = null, traffic = null, editingInboundId = null, editingRelayId = null;
+let relays = [], inbounds = [], users = [], agents = [], auditEntries = [], filter = 'all', systemInfo = null, traffic = null, editingInboundId = null, editingRelayId = null;
 const agentCardCollapsed = new Set((() => { try { const value = JSON.parse(localStorage.getItem('3xui-agent-collapsed') || '[]'); return Array.isArray(value) ? value : []; } catch { return []; } })());
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, match => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[match]));
@@ -23,13 +23,22 @@ async function api(url, options = {}) {
   const res = await fetch(url, { credentials: 'same-origin', headers: { 'Content-Type': 'application/json', ...(options.headers || {}) }, ...options });
   const payload = res.status === 204 ? null : await res.json().catch(() => ({}));
   if (!res.ok) {
+    const error = new Error(payload.error || '请求失败'); error.status = res.status; error.code = payload.code || '';
     if (res.status === 401) showLogin();
-    throw new Error(payload.error || '请求失败');
+    if (error.code === 'PASSWORD_CHANGE_REQUIRED') forcePasswordChange();
+    throw error;
   }
   return payload;
 }
 function showLogin(note = '') { $('#loginGate').classList.remove('hidden'); if (note) $('#loginNote').textContent = note; }
 function hideLogin() { $('#loginGate').classList.add('hidden'); }
+function toast(message, type = 'info') {
+  const item = document.createElement('div'); item.className = `toast ${type}`; item.textContent = message; $('#toastStack').appendChild(item); setTimeout(() => item.remove(), 4200);
+}
+function forcePasswordChange() {
+  hideLogin(); const modal = $('#passwordModal'); modal.dataset.required = 'true'; $('#passwordRequirement').hidden = false;
+  if (!modal.open) modal.showModal(); modal.querySelector('input')?.focus();
+}
 function formatBytes(value) {
   const bytes = Math.max(0, Number(value || 0));
   if (bytes < 1024) return `${bytes} B`;
@@ -109,9 +118,26 @@ function populateTrafficOptions() {
   const userSelect = $('#trafficUser'), inboundSelect = $('#trafficInbound');
   userSelect.innerHTML = users.filter(item => item.status === 'running').map(item => `<option value="${item.id}">${esc(item.name)} · ${esc(item.email)}</option>`).join('') || '<option value="">没有可用用户</option>';
   inboundSelect.innerHTML = '<option value="">未指定入站</option>' + inbounds.filter(item => item.status === 'running').map(item => `<option value="${item.id}">${esc(item.name)} · ${esc(item.protocol)}</option>`).join('');
+}function auditResourceLabel(entry) {
+  if (entry.action === 'auth.login') return '管理员登录'; if (entry.action === 'auth.logout') return '退出登录';
+  const section = String(entry.resource || '').split('/')[2] || 'system'; const labels = { relays: '中转规则', inbounds: '入站节点', users: '用户', agents: 'Agent', traffic: '流量', runtime: 'Xray Core', system: '系统设置' };
+  return `${entry.method || ''} ${labels[section] || section}`.trim();
+}
+function renderAudit() {
+  const target = $('#auditLog'); if (!target) return;
+  target.innerHTML = auditEntries.length ? auditEntries.map(entry => `<div class="audit-row"><div><strong>${esc(new Date(entry.at).toLocaleString('zh-CN'))}</strong><small>${esc(entry.ip || 'unknown')} · ${esc(entry.actor || 'unknown')}</small></div><div><strong>${esc(auditResourceLabel(entry))}</strong><small>${esc(entry.resource || '')}${entry.status ? ` · HTTP ${Number(entry.status)}` : ''}</small></div><span class="audit-outcome ${esc(entry.outcome || '')}">${entry.outcome === 'success' ? '成功' : entry.outcome === 'blocked' ? '已阻止' : '已拒绝'}</span></div>`).join('') : '<p class="empty-state">暂无管理员操作记录。</p>';
 }function renderSystem() {
   if (!systemInfo) return;
   $('#adminName').textContent = systemInfo.admin.username;
+  const security = systemInfo.security || {}; const checks = [
+    { ok: !security.defaultPassword && !security.mustChangePassword, name: '管理员密码', detail: security.defaultPassword ? '仍在使用默认密码' : '已移除默认凭据' },
+    { ok: security.transportSecure, name: 'HTTPS 传输', detail: security.transportSecure ? '当前请求经 HTTPS 保护' : '当前面板仍通过 HTTP 访问' },
+    { ok: security.secureCookie, name: '安全会话 Cookie', detail: security.secureCookie ? 'Secure Cookie 已启用' : '请设置 SECURE_COOKIE=true' },
+    { ok: true, name: '操作审计', detail: `已记录 ${Number(security.auditEntries || 0)} 条事件` }
+  ];
+  const score = checks.filter(item => item.ok).length; const grade = $('#securityGrade'); grade.textContent = `${score}/4`; grade.className = `security-grade ${score === 4 ? 'good' : 'warn'}`;
+  $('#securitySummary').textContent = score === 4 ? '关键安全控制项已全部启用。' : `仍有 ${4 - score} 项商用部署基线需要处理。`;
+  $('#securityChecks').innerHTML = checks.map(item => `<div class="security-check ${item.ok ? 'good' : ''}"><i></i><div><strong>${esc(item.name)}</strong><small>${esc(item.detail)}</small></div></div>`).join('');
   const tls = systemInfo.tls;
   $('#tlsDomain').value = tls.domain || ''; $('#tlsEmail').value = tls.email || ''; $('#certPath').value = tls.certPath || ''; $('#keyPath').value = tls.keyPath || '';
   $('#tlsSummary').textContent = tls.ready ? `证书已就绪：${tls.domain}（重启后启用 HTTPS）` : tls.domain ? `已保存 ${tls.domain} 的配置，尚未检测到可用证书文件。` : '尚未配置证书。';
@@ -126,8 +152,8 @@ function populateTrafficOptions() {
 }
 async function load() {
   try {
-    const [relayData, inboundData, userData, agentData, config, trafficData] = await Promise.all([api('/api/relays'), api('/api/inbounds'), api('/api/users'), api('/api/agents'), api('/api/system'), api('/api/traffic')]);
-    relays = relayData; inbounds = inboundData; users = userData; agents = agentData; systemInfo = config; traffic = trafficData; renderRelays(); renderInbounds(); renderUsers(); renderAgents(); renderTraffic(); renderSystem();
+    const [relayData, inboundData, userData, agentData, config, trafficData, auditData] = await Promise.all([api('/api/relays'), api('/api/inbounds'), api('/api/users'), api('/api/agents'), api('/api/system'), api('/api/traffic'), api('/api/system/audit')]);
+    relays = relayData; inbounds = inboundData; users = userData; agents = agentData; systemInfo = config; traffic = trafficData; auditEntries = auditData.entries || []; renderRelays(); renderInbounds(); renderUsers(); renderAgents(); renderTraffic(); renderSystem(); renderAudit();
   } catch (error) {
     console.error(error); $('#cards').innerHTML = `<article>${zh.apiFailed}</article>`; $('#inboundCards').innerHTML = `<article>${zh.apiFailed}</article>`; $('#userCards').innerHTML = `<article>${zh.apiFailed}</article>`;
   }
@@ -184,7 +210,7 @@ $('#newRelay').onclick = () => { editingRelayId = null; const form = $('#form');
 $('#newAgent').onclick = () => { $('#agentControllerUrl').value = location.origin; $('#agentModal').showModal(); };$('#import3xuiInbound').onclick = () => { populateInboundAgents(); const select = $('#importInboundAgent'); select.innerHTML = $('#inboundAgent').innerHTML; const address = $('#import3xuiForm').elements.serverAddress; if (!address.value && systemInfo?.network?.publicAddress) address.value = systemInfo.network.publicAddress; $('#import3xuiModal').showModal(); };$('#newInbound').onclick = () => { editingInboundId = null; const form = $('#inboundForm'); form.reset(); $('#inboundProtocol').disabled = false; $('#inboundModalTitle').textContent = '生成入站节点'; $('#inboundSubmit').textContent = '生成节点'; populateInboundAgents(); applyInboundTemplate(true); const address = form.elements.serverAddress; if (address && !address.value && systemInfo?.network?.publicAddress) address.value = systemInfo.network.publicAddress; $('#inboundModal').showModal(); };
 $('#newUser').onclick = () => { editingUserId = null; const form = $('#userForm'); form.reset(); form.elements.name.disabled = false; form.elements.email.disabled = false; form.elements.inboundId.disabled = false; $('#userModalTitle').textContent = '创建用户'; $('#userSubmit').textContent = '创建并启用'; populateUserInbounds(); $('#userModal').showModal(); };
 $('#newTraffic').onclick = () => { populateTrafficOptions(); $('#trafficModal').showModal(); };
-$('#changePassword').onclick = () => $('#passwordModal').showModal();
+$('#changePassword').onclick = () => { const modal = $('#passwordModal'); delete modal.dataset.required; $('#passwordRequirement').hidden = true; modal.showModal(); };
 $('#openSystem').onclick = () => activatePage('system');
 $('#inboundProtocol').onchange = () => applyInboundTemplate(true);
 $('#inboundForm').addEventListener('input', event => { if (event.target.name) event.target.dataset.auto = '0'; });
@@ -210,14 +236,17 @@ $('#import3xuiForm').onsubmit = event => submitOnce(event, async form => { await
 $('#inboundForm').onsubmit = event => submitOnce(event, async form => { const target = editingInboundId ? '/api/inbounds/' + editingInboundId : '/api/inbounds'; await api(target, { method: editingInboundId ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); editingInboundId = null; form.reset(); $('#inboundProtocol').disabled = false; $('#inboundModal').close(); await load(); });
 $('#userForm').onsubmit = event => submitOnce(event, async form => { const target = editingUserId ? `/api/users/${editingUserId}` : '/api/users'; await api(target, { method: editingUserId ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); editingUserId = null; form.reset(); form.elements.name.disabled = false; form.elements.email.disabled = false; form.elements.inboundId.disabled = false; $('#userModal').close(); await load(); });
 $('#trafficForm').onsubmit = event => submitOnce(event, async form => { const response = await api('/api/traffic/record', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); form.reset(); $('#trafficModal').close(); await load(); if (response.reachedLimit) alert('该用户已达到流量配额，系统已自动暂停其访问。'); });
-$('#passwordForm').onsubmit = event => submitOnce(event, async form => { const data = Object.fromEntries(new FormData(form)); if (data.newPassword !== data.confirmPassword) return alert('两次新密码不一致'); await api('/api/system/password', { method: 'POST', body: JSON.stringify(data) }); form.reset(); $('#passwordModal').close(); showLogin('密码已更新，请使用新密码重新登录。'); });
+$('#passwordForm').onsubmit = event => submitOnce(event, async form => { const data = Object.fromEntries(new FormData(form)); if (data.newPassword !== data.confirmPassword) return toast('两次新密码不一致', 'error'); await api('/api/system/password', { method: 'POST', body: JSON.stringify(data) }); form.reset(); const modal = $('#passwordModal'); delete modal.dataset.required; modal.close(); showLogin('密码已更新，请使用新密码重新登录。'); });
 $('#tlsForm').onsubmit = event => submitOnce(event, async form => { const data = Object.fromEntries(new FormData(form)); const response = await api('/api/system/tls', { method: 'POST', body: JSON.stringify(data) }); systemInfo.tls = response.tls; renderSystem(); alert('证书配置已保存。'); });
 $('#requestCert').onclick = async () => { const data = Object.fromEntries(new FormData($('#tlsForm'))); try { const response = await api('/api/system/tls/request', { method: 'POST', body: JSON.stringify(data) }); systemInfo.tls = response.tls; renderSystem(); alert(response.message); } catch (error) { alert(error.message); } };
 $('#applyCert').onclick = async () => { try { const response = await api('/api/system/tls/apply', { method: 'POST' }); alert(response.message); await load(); } catch (error) { alert(error.message); } };
 $('#installCore').onclick = async () => { try { const version = $('#coreVersion').value.trim(); $('#installCore').disabled = true; $('#installCore').textContent = '正在下载并校验…'; const response = await api('/api/runtime/install', { method: 'POST', body: JSON.stringify({ version }) }); systemInfo.runtime = response.info; systemInfo.network = response.network || systemInfo.network; $('#coreVersion').value = ''; renderSystem(); alert(`Xray Core ${response.version || ''} 已安装，可点击“启动 Core”。`); } catch (error) { alert(error.message); await load(); } };$('#detectAddress').onclick = async () => { try { $('#detectAddress').disabled = true; $('#publicAddressDetail').textContent = '正在检测 VPS 公网地址…'; systemInfo.network = await api('/api/system/network/detect', { method: 'POST' }); renderSystem(); } catch (error) { alert(error.message); await load(); } };$('#startRuntime').onclick = async () => { try { const runtime = await api('/api/runtime/start', { method: 'POST' }); systemInfo.runtime = runtime; renderSystem(); await load(); } catch (error) { alert(error.message); } };
 $('#stopRuntime').onclick = async () => { try { const runtime = await api('/api/runtime/stop', { method: 'POST' }); systemInfo.runtime = runtime; renderSystem(); } catch (error) { alert(error.message); } };
 $('#downloadConfig').onclick = async () => { try { const config = await api('/api/runtime/config'); const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = 'xray-config.json'; link.click(); URL.revokeObjectURL(url); } catch (error) { alert(error.message); } };
-$('#loginForm').onsubmit = event => submitOnce(event, async form => { const data = Object.fromEntries(new FormData(form)); const response = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }); if (response.transportWarning) alert(response.transportWarning); hideLogin(); form.reset(); await load(); }, error => { $('#loginNote').textContent = error.message; });
+$('#downloadBackup').onclick = async () => { try { const backup = await api('/api/system/backup'); const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = `3xui-lite-backup-${new Date().toISOString().slice(0, 10)}.json`; link.click(); URL.revokeObjectURL(url); toast('完整配置备份已下载，请将文件存放在安全位置。', 'success'); } catch (error) { toast(error.message, 'error'); } };
+$('#refreshAudit').onclick = async () => { try { const data = await api('/api/system/audit'); auditEntries = data.entries || []; if (systemInfo?.security) systemInfo.security.auditEntries = auditEntries.length; renderAudit(); renderSystem(); toast('审计记录已刷新。', 'success'); } catch (error) { toast(error.message, 'error'); } };
+$('#passwordModal').addEventListener('cancel', event => { if ($('#passwordModal').dataset.required === 'true') event.preventDefault(); });
+$('#loginForm').onsubmit = event => submitOnce(event, async form => { const data = Object.fromEntries(new FormData(form)); const response = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }); if (response.transportWarning) toast(response.transportWarning, 'error'); hideLogin(); form.reset(); if (response.mustChangePassword) return forcePasswordChange(); await load(); }, error => { $('#loginNote').textContent = error.message; });
 $('#logout').onclick = async () => { try { await api('/api/auth/logout', { method: 'POST' }); } finally { showLogin('已安全退出。'); } };
 function setTheme(dark) {
   document.body.classList.toggle('dark', dark); const label = dark ? '切换到浅色主题' : '切换到深色主题'; $('#theme').setAttribute('aria-pressed', String(dark)); $('#theme').setAttribute('aria-label', label); $('#theme').title = label; $('#theme').textContent = dark ? '☾' : '☼';
@@ -230,4 +259,4 @@ $('#menu').onclick = () => { const open = !$('.sidebar').classList.contains('ope
 $('#sidebarScrim').onclick = closeSidebar;
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && $('.sidebar').classList.contains('open')) { closeSidebar(); $('#menu').focus(); } });
 const initialPage = location.hash.slice(1); if (pageNames[initialPage]) activatePage(initialPage);
-(async () => { try { const session = await api('/api/auth/me'); if (session.authenticated) { hideLogin(); await load(); } else showLogin(); } catch { showLogin('无法连接面板服务，请确认已运行 node server.js。'); } })();
+(async () => { try { const session = await api('/api/auth/me'); if (session.authenticated) { hideLogin(); if (session.mustChangePassword) forcePasswordChange(); else await load(); } else showLogin(); } catch { showLogin('无法连接面板服务，请确认已运行 node server.js。'); } })();

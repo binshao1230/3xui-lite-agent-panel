@@ -1,4 +1,4 @@
-# 3xUI Lite Agent Panel
+# 3xUI Lite Agent Panel v0.7.0
 
 面向 Linux VPS 的 Xray 管理与中转面板，提供协议配置模板、流量统计、Agent 管理、远程 TCP/UDP 中转、远程入站下发、Agent 自更新，以及远程安装 Xray Core 等能力。
 
@@ -23,8 +23,18 @@ sudo journalctl -u 3xui-lite-agent-panel -f
 curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/main/install.sh | sudo PORT=8443 bash
 ```
 
-初始账号密码为 `admin / admin`。首次登录后请立即修改密码。
+初始账号密码为 `admin / admin`。首次登录后，面板会强制修改默认密码；完成前其他管理 API 保持锁定。
 
+
+## v0.7 商用运维基线
+
+- **强制默认密码迁移**：自动识别仍在使用 `admin / admin` 的历史安装；修改密码前锁定其他管理接口。
+- **管理员操作审计**：记录登录成功/失败、配置写操作、响应状态、来源 IP 和客户端信息，私有保存最近 1,000 条。
+- **完整配置备份**：系统页可导出账号哈希、Agent 令牌、节点、用户、流量和审计记录，并附带 SHA-256 完整性校验。备份含敏感凭据，应仅通过 HTTPS 下载并离线加密保存。
+- **跨站写入保护**：浏览器写操作校验 Origin/Host，配合 `SameSite=Strict` Cookie 降低跨站请求风险。
+- **安全状态总览**：系统页集中显示默认密码、HTTPS、Secure Cookie 和审计状态。
+- **数据引用保护**：仍承载资源的 Agent、仍分配给用户的入站不能直接删除，避免产生悬空配置。
+- **部署加固**：systemd 服务增加内核、SUID、地址族、资源上限和停止超时限制。
 ## 无法从外网访问时
 
 面板默认显式监听 `0.0.0.0:3000`。如果本机服务正常但浏览器访问超时，请检查云平台安全组和系统防火墙：
@@ -58,7 +68,7 @@ Agent 通过 systemd 服务部署。它可以接收面板下发的 Xray 安装�
 - 首次登录后立刻修改默认 `admin / admin` 密码。
 - 对外暴露前请通过反向代理或证书配置 HTTPS。
 - 防火墙仅放行面板端口，以及实际启用的节点或中转端口。
-- 运行时数据、节点配置和 Agent 令牌均不会被提交到仓库或包含在发布源码中。
+- 运行时数据、节点配置、审计记录和 Agent 令牌均不会被提交到仓库或包含在发布源码中。
 ## 3x-ui 入站配置兼容
 
 入站页面提供“导入 3x-ui 配置”入口，可粘贴 3x-ui 导出的单个入站 JSON。支持 VLESS（含 Reality、TCP、TLS、WebSocket、gRPC）、Trojan 与 Shadowsocks；导入时会保留原始 UUID、用户密码、Reality 私钥、shortId、传输层和 TLS 参数。

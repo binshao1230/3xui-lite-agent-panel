@@ -17,7 +17,9 @@ const trafficFile = path.join(root, 'traffic.json');
 const agentFile = path.join(root, 'agents.json');
 const runtimeFile = path.join(root, 'runtime-xray.json');
 const settingFile = path.join(root, 'settings.json');
+const auditFile = path.join(root, 'audit.json');
 const port = Number(process.env.PORT || 3000);
+const PANEL_VERSION = '0.7.0';
 const sessions = new Map();
 const loginAttempts = new Map();
 const runtime = { child: null, startedAt: '', lastError: '', lastLog: '', installing: false };
@@ -33,20 +35,30 @@ const protocols = new Set(Object.keys(protocolMap));
 const statuses = new Set(['running', 'stopped']);
 const ss2022Methods = new Set(['2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305']);
 const types = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8' };
-const securityHeaders = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Content-Security-Policy': "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" };
+const securityHeaders = { 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Resource-Policy': 'same-origin', 'Referrer-Policy': 'no-referrer', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()', 'Content-Security-Policy': "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'" };
 const seedUsers = [];
 
 function token(bytes = 16) { return crypto.randomBytes(bytes).toString('base64url'); }
 let lastGeneratedId = 0;
 function id() { const now = Date.now() * 1000; lastGeneratedId = Math.max(now, lastGeneratedId + 1); return lastGeneratedId; }
 function passwordHash(password, salt = token(16)) { return { salt, hash: crypto.scryptSync(password, salt, 64).toString('base64') }; }
+function usesDefaultPassword(admin) {
+  if (!admin?.salt || !admin?.hash) return true;
+  const expected = passwordHash('admin', admin.salt).hash;
+  return expected.length === admin.hash.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(admin.hash));
+}
 function defaultSettings() {
-  return { admin: { username: 'admin', ...passwordHash('admin'), mustChangePassword: false }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '' } };
+  return { admin: { username: 'admin', ...passwordHash('admin'), mustChangePassword: true, defaultPassword: true, defaultPasswordChecked: true }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '' } };
 }
 function readSettings() {
   try {
     const data = JSON.parse(fs.readFileSync(settingFile, 'utf8'));
-    if (data?.admin?.salt && data?.admin?.hash) return { admin: { username: 'admin', ...data.admin, mustChangePassword: false }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '', ...data.tls } };
+    if (data?.admin?.salt && data?.admin?.hash) {
+      const admin = { username: 'admin', ...data.admin };
+      if (admin.defaultPasswordChecked !== true) { admin.defaultPassword = usesDefaultPassword(admin); admin.defaultPasswordChecked = true; admin.mustChangePassword = Boolean(admin.mustChangePassword || admin.defaultPassword); writeSettings({ ...data, admin }); }
+      admin.defaultPassword = Boolean(admin.defaultPassword); admin.mustChangePassword = Boolean(admin.mustChangePassword || admin.defaultPassword);
+      return { admin, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '', ...data.tls } };
+    }
   } catch {}
   const settings = defaultSettings();
   writeSettings(settings);
@@ -65,6 +77,25 @@ function readStore(file, fallback, normalizer) {
   } catch { return fallback.map(item => ({ ...item })); }
 }
 function writeStore(file, items) { writePrivateFile(file, JSON.stringify(items, null, 2)); }
+function readAudit(limit = 120) {
+  try { const entries = JSON.parse(fs.readFileSync(auditFile, 'utf8')); return Array.isArray(entries) ? entries.slice(0, Math.max(1, Math.min(Number(limit) || 120, 1000))) : []; } catch { return []; }
+}
+function auditEvent(event) {
+  try { const entries = readAudit(1000); entries.unshift({ id: id(), at: new Date().toISOString(), ...event }); writeStore(auditFile, entries.slice(0, 1000)); } catch (error) { console.error('Audit write failed:', error.message || error); }
+}
+function clientAddress(req) {
+  const forwarded = process.env.TRUST_PROXY === 'true' ? String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() : ''; return forwarded || req.socket.remoteAddress || 'unknown';
+}
+function pruneLoginAttempts(now) {
+  if (loginAttempts.size <= 5000) return;
+  for (const [key, attempt] of loginAttempts) if (now - attempt.startedAt > 15 * 60 * 1000 && attempt.until <= now) loginAttempts.delete(key);
+  while (loginAttempts.size > 5000) loginAttempts.delete(loginAttempts.keys().next().value);
+}
+function createBackup() {
+  const data = { settings: readSettings(), relays: readStore(relayFile, seedRelays, normalizeRelay), inbounds: readStore(inboundFile, seedInbounds, normalizeInbound), users: readStore(userFile, seedUsers), agents: readAgents(), traffic: readStore(trafficFile, []), audit: readAudit(1000) };
+  const checksum = crypto.createHash('sha256').update(JSON.stringify(data)).digest('hex');
+  return { format: '3xui-lite-backup', schemaVersion: 1, panelVersion: PANEL_VERSION, exportedAt: new Date().toISOString(), checksum: 'sha256:' + checksum, containsSecrets: true, data };
+}
 function removeLegacyDemoData() {
   const remove = (file, predicate) => {
     try {
@@ -141,14 +172,20 @@ function requestIsSecure(req) {
   if (process.env.TRUST_PROXY !== 'true') return false;
   return String(req.headers['x-forwarded-proto'] || '').split(',').some(value => value.trim().toLowerCase() === 'https');
 }
+function requestOriginAllowed(req) {
+  if (!['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) return true;
+  const origin = cleanText(req.headers.origin, '', 512); if (!origin) return true;
+  const expectedHost = cleanText(process.env.TRUST_PROXY === 'true' ? (req.headers['x-forwarded-host'] || req.headers.host) : req.headers.host, '', 255);
+  try { const parsed = new URL(origin); const protocol = requestIsSecure(req) ? 'https:' : 'http:'; return parsed.protocol === protocol && parsed.host === expectedHost; } catch { return false; }
+}
 function sessionCookie(req, value, seconds = 0) {
-  const secure = process.env.SECURE_COOKIE === 'true' && requestIsSecure(req) ? '; Secure' : '';
+  const secure = process.env.SECURE_COOKIE === 'true' ? '; Secure' : '';
   return `session=${value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${seconds}${secure}`;
 }
 function requireAuth(req, res) {
-  if (currentSession(req)) return true;
+  const session = currentSession(req); if (session) return session;
   json(res, 401, { error: '请先登录管理员账号' });
-  return false;
+  return null;
 }
 function shortId() { return crypto.randomBytes(8).toString('hex'); }
 function x25519Pair() {
@@ -450,7 +487,7 @@ async function handleAgentGateway(req, res, parts) {
   if (parts.length === 5 && parts[3] === 'xray' && parts[4] === 'install' && req.method === 'POST') { agent.xrayInstallRequestId = token(12); agent.xrayInstallRequestedAt = new Date().toISOString(); agent.xrayInstallError = ''; agent.updatedAt = agent.xrayInstallRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发 Xray Core 安装任务，等待 Agent 执行。' }); }  if (parts.length === 4 && parts[3] === 'update' && req.method === 'POST') { agent.updateRequestId = token(12); agent.updateRequestedAt = new Date().toISOString(); agent.updatedAt = agent.updateRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发更新请求，等待 Agent 心跳执行。' }); }
   if (parts.length === 4 && parts[3] === 'bootstrap' && req.method === 'GET') return json(res, 200, { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token });
   if (req.method === 'PATCH') { const data = patchData; if (data.enabled !== undefined) agent.enabled = Boolean(data.enabled); if (data.controllerUrl !== undefined) { const target = controllerUrl(data.controllerUrl); if (!target) return json(res, 400, { error: '控制面板地址必须是有效的 HTTP/HTTPS 地址' }); agent.controllerUrl = target; } if (data.name !== undefined) { const name = cleanText(data.name, '', 80); if (!name) return json(res, 400, { error: '机器名称不能为空' }); agent.name = name; } if (data.rotateToken === true) agent.token = token(32); agent.updatedAt = new Date().toISOString(); writeStore(agentFile, agents); return json(res, 200, { agent: agentPublic(agent), deployment: (data.rotateToken === true || data.controllerUrl !== undefined) ? { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } : undefined }); }
-  if (req.method === 'DELETE') { writeStore(agentFile, agents.filter(item => item.id !== agentId)); return json(res, 204); }
+  if (req.method === 'DELETE') { const assignedInbounds = readStore(inboundFile, seedInbounds, normalizeInbound).filter(item => item.agentId === agentId); const assignedRelays = readStore(relayFile, seedRelays, normalizeRelay).filter(item => item.agentId === agentId); if (assignedInbounds.length || assignedRelays.length) return json(res, 409, { error: '该 Agent 仍承载 ' + assignedInbounds.length + ' 个入站和 ' + assignedRelays.length + ' 条中转，请先迁移或删除这些资源' }); writeStore(agentFile, agents.filter(item => item.id !== agentId)); return json(res, 204); }
   return json(res, 405, { error: 'Method not allowed' });
 }function normalizeRelay(item) {
   if (!item || typeof item !== 'object') return item;
@@ -581,21 +618,22 @@ async function handleAuth(req, res, pathname) {
     return json(res, 200, { authenticated: Boolean(session), username: session?.username || '', mustChangePassword: Boolean(session && settings.admin.mustChangePassword) });
   }
   if (pathname === '/api/auth/login' && req.method === 'POST') {
-    const remote = req.socket.remoteAddress || 'unknown'; const attempt = loginAttempts.get(remote); const now = Date.now();
-    if (attempt && attempt.until > now) return json(res, 429, { error: '登录尝试过多，请 15 分钟后再试' });
+    const remote = clientAddress(req); const now = Date.now(); pruneLoginAttempts(now); const attempt = loginAttempts.get(remote);
+    if (attempt && attempt.until > now) { auditEvent({ actor: 'anonymous', action: 'auth.login', resource: '/api/auth/login', outcome: 'blocked', status: 429, ip: clientAddress(req) }); return json(res, 429, { error: '登录尝试过多，请 15 分钟后再试' }); }
     const data = await body(req); const settings = readSettings();
     const valid = cleanText(data.username, '', 64) === settings.admin.username && typeof data.password === 'string' && crypto.timingSafeEqual(Buffer.from(passwordHash(data.password, settings.admin.salt).hash), Buffer.from(settings.admin.hash));
     if (!valid) {
       const count = (attempt && now - attempt.startedAt < 15 * 60 * 1000 ? attempt.count : 0) + 1;
       loginAttempts.set(remote, { count, startedAt: attempt?.startedAt || now, until: count >= 5 ? now + 15 * 60 * 1000 : 0 });
+      auditEvent({ actor: cleanText(data.username, 'unknown', 64), action: 'auth.login', resource: '/api/auth/login', outcome: 'denied', status: 401, ip: clientAddress(req) });
       return json(res, 401, { error: '用户名或密码错误' });
     }
-    loginAttempts.delete(remote);
+    loginAttempts.delete(remote); auditEvent({ actor: settings.admin.username, action: 'auth.login', resource: '/api/auth/login', outcome: 'success', status: 200, ip: clientAddress(req) });
     const value = token(32); sessions.set(value, { username: settings.admin.username, expiresAt: Date.now() + 8 * 60 * 60 * 1000 });
     return json(res, 200, { ok: true, mustChangePassword: settings.admin.mustChangePassword, transportWarning: process.env.SECURE_COOKIE === 'true' && !requestIsSecure(req) ? '当前访问不是受信任的 HTTPS，请使用 HTTPS 反向代理访问面板。' : '' }, { 'Set-Cookie': sessionCookie(req, value, 8 * 60 * 60) });
   }
   if (pathname === '/api/auth/logout' && req.method === 'POST') {
-    const session = currentSession(req); if (session) sessions.delete(session.token);
+    const session = currentSession(req); if (session) { auditEvent({ actor: session.username, action: 'auth.logout', resource: '/api/auth/logout', outcome: 'success', status: 200, ip: clientAddress(req) }); sessions.delete(session.token); }
     return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, '', 0) });
   }
   return false;
@@ -677,7 +715,7 @@ async function handleRelays(req, res, parts) {
     const relays = readStore(relayFile, seedRelays, normalizeRelay); if (relays.some(relay => (relay.agentId || '') === updated.agentId && relay.listenPort === updated.port)) return json(res, 409, { error: '该执行节点的监听端口已被中转规则占用' });
     inbounds[index] = updated; writeStore(inboundFile, inbounds); if (!inbound.agentId || !updated.agentId) { if (!updated.agentId && updated.status === 'running') await ensureLocalRuntime(); else await syncRuntimeIfRunning(); } return json(res, 200, inboundSnapshot(updated));
   }
-  if (req.method === 'DELETE') { const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const inbound = inbounds.find(item => item.id === inboundId); if (!inbound) return json(res, 404, { error: 'Not found' }); writeStore(inboundFile, inbounds.filter(item => item.id !== inboundId)); if (!inbound.agentId) await syncRuntimeIfRunning(); return json(res, 204); }
+  if (req.method === 'DELETE') { const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const inbound = inbounds.find(item => item.id === inboundId); if (!inbound) return json(res, 404, { error: 'Not found' }); const assignedUsers = readStore(userFile, seedUsers).filter(user => (user.access || []).some(access => access.inboundId === inboundId)); if (assignedUsers.length) return json(res, 409, { error: '该入站仍分配给 ' + assignedUsers.length + ' 个用户，请先删除或迁移这些用户' }); writeStore(inboundFile, inbounds.filter(item => item.id !== inboundId)); if (!inbound.agentId) await syncRuntimeIfRunning(); return json(res, 204); }
   return json(res, 405, { error: 'Method not allowed' });
 }async function handleUsers(req, res, parts) {
   const userId = Number(parts[2]);
@@ -879,14 +917,16 @@ async function installXray() {
   if (parts.length === 3 && parts[2] === 'stop' && req.method === 'POST') { stopRuntime(); return json(res, 200, runtimeInfo()); }
   return json(res, 405, { error: 'Method not allowed' });
 }async function handleSystem(req, res, pathname) {
-  if (pathname === '/api/system' && req.method === 'GET') { const settings = readSettings(); return json(res, 200, { admin: { username: settings.admin.username, mustChangePassword: settings.admin.mustChangePassword }, tls: tlsPublic(settings), certbotAvailable: certbotExists(), runtime: runtimeInfo(), network: networkInfo() }); }
+  if (pathname === '/api/system' && req.method === 'GET') { const settings = readSettings(); return json(res, 200, { panelVersion: PANEL_VERSION, admin: { username: settings.admin.username, mustChangePassword: settings.admin.mustChangePassword }, tls: tlsPublic(settings), certbotAvailable: certbotExists(), runtime: runtimeInfo(), network: networkInfo(), security: { transportSecure: requestIsSecure(req), secureCookie: process.env.SECURE_COOKIE === 'true', trustProxy: process.env.TRUST_PROXY === 'true', defaultPassword: settings.admin.defaultPassword === true, mustChangePassword: settings.admin.mustChangePassword === true, auditEntries: readAudit(1000).length } }); }
+  if (pathname === '/api/system/audit' && req.method === 'GET') return json(res, 200, { entries: readAudit(200) });
+  if (pathname === '/api/system/backup' && req.method === 'GET') { const backup = createBackup(); const date = new Date().toISOString().slice(0, 10); return json(res, 200, backup, { 'Content-Disposition': 'attachment; filename=3xui-lite-backup-' + date + '.json' }); }
   if (pathname === '/api/system/network' && req.method === 'GET') return json(res, 200, networkInfo());
   if (pathname === '/api/system/network/detect' && req.method === 'POST') return json(res, 200, await detectPublicAddress(true));  if (pathname === '/api/system/password' && req.method === 'POST') {
     const data = await body(req); const settings = readSettings(); const candidate = typeof data.currentPassword === 'string' ? passwordHash(data.currentPassword, settings.admin.salt).hash : '';
     if (!candidate || !crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(settings.admin.hash))) return json(res, 400, { error: '当前密码不正确' });
     if (typeof data.newPassword !== 'string' || data.newPassword.length < 10 || data.newPassword.length > 128) return json(res, 400, { error: '新密码需为 10–128 个字符' });
     if (data.newPassword === data.currentPassword) return json(res, 400, { error: '新密码不能与当前密码相同' });
-    Object.assign(settings.admin, passwordHash(data.newPassword), { mustChangePassword: false }); writeSettings(settings); sessions.clear();
+    Object.assign(settings.admin, passwordHash(data.newPassword), { mustChangePassword: false, defaultPassword: false, defaultPasswordChecked: true }); writeSettings(settings); sessions.clear();
     return json(res, 200, { ok: true }, { 'Set-Cookie': sessionCookie(req, '', 0) });
   }
   if (pathname === '/api/system/tls' && req.method === 'POST') {
@@ -916,11 +956,14 @@ async function installXray() {
 async function requestHandler(req, res) {
   try {
     const url = new URL(req.url, 'http://localhost'); const parts = url.pathname.split('/').filter(Boolean);
+    if (parts[0] === 'api' && parts[1] !== 'agent' && !requestOriginAllowed(req)) return json(res, 403, { error: '请求来源校验失败', code: 'ORIGIN_REJECTED' });
     if (url.pathname.startsWith('/api/auth/')) { const handled = await handleAuth(req, res, url.pathname); if (handled !== false) return; return json(res, 404, { error: 'Not found' }); }
-    if (url.pathname === '/api/health' && req.method === 'GET') return json(res, 200, { ok: true });
+    if (url.pathname === '/api/health' && req.method === 'GET') return json(res, 200, { ok: true, version: PANEL_VERSION });
     if (parts[0] === 'api' && parts[1] === 'agent') { await reconcileExpiredUsers(); return handleAgentGateway(req, res, parts); }
     if (parts[0] === 'api') {
-      if (!requireAuth(req, res)) return;
+      const session = requireAuth(req, res); if (!session) return;
+      if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) res.once('finish', () => auditEvent({ actor: session.username, action: 'admin.request', resource: url.pathname, method: req.method, outcome: res.statusCode < 400 ? 'success' : 'denied', status: res.statusCode, ip: clientAddress(req), userAgent: cleanText(req.headers['user-agent'], '', 180) }));
+      const settings = readSettings(); if (settings.admin.mustChangePassword && url.pathname !== '/api/system/password') return json(res, 403, { error: '首次使用必须先修改默认管理员密码', code: 'PASSWORD_CHANGE_REQUIRED' });
       await reconcileExpiredUsers();
       if (parts[1] === 'relays') return handleRelays(req, res, parts);
       if (parts[1] === 'agents') return handleAgents(req, res, parts);

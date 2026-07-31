@@ -1,5 +1,16 @@
 {
   "dependencies": {
     "qrcode": "1.5.4"
+  },
+  "private": true,
+  "name": "3xui-lite-agent-panel",
+  "version": "0.7.0",
+  "description": "Commercial-ready Xray multi-node operations panel",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check app.js && node --check agent.js"
   }
 }
