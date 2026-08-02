@@ -4,10 +4,10 @@
   },
   "private": true,
   "name": "3xui-lite-agent-panel",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Commercial-ready Xray multi-node operations panel",
   "engines": {
-    "node": ">=18"
+    "node": "^22.0.0 || ^24.0.0"
   },
   "scripts": {
     "start": "node server.js",

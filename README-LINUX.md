@@ -6,7 +6,7 @@
 
 - Debian/Ubuntu、Rocky/Alma、CentOS，或其他支持 systemd 的 Linux 发行版
 - root 权限或 sudo 权限
-- Node.js 18 或更高版本（部署脚本可自动安装）
+- Node.js 22 LTS 或 24 LTS（推荐 24；部署脚本默认安装 Node.js 24 LTS）
 - 可访问 npm 的网络环境
 
 ## 安装方式
@@ -17,12 +17,20 @@ cd 3xui-lite-linux
 sudo bash ./deploy-linux.sh
 ```
 
+重复执行部署脚本会先在临时目录按锁文件安装依赖、禁用依赖安装脚本并完成语法检查，通过后才覆盖应用文件；已有的端口、监听地址和 Cookie/代理安全设置会自动保留。若新版本服务未能正常启动，安装器会恢复原源码、依赖、systemd 单元及原有启用/运行状态。需要更改这些设置时，可在升级命令中显式传入新的环境变量。
+
+自定义 `APP_DIR` 必须指向独立应用目录，例如 `/opt/3xui-lite-agent-panel`。从根目录到目标目录的每一级现有目录都必须由 `root:root` 所有且不可由组/其他用户写入；安装器会拒绝根目录、关键系统目录、符号链接目录以及包含引号、反斜杠或 `.` / `..` 路径段的值。
+
+部署完成后，安装器会将本轮发布的应用源码和依赖设为 `root:root`，移除组及其他用户的写权限，并将已知敏感数据文件设为 `0600`；升级失败时会恢复原有文件元数据。
+
 服务名称为 `3xui-lite-agent-panel`，默认监听 `3000` 端口。
 
 ```bash
 sudo systemctl status 3xui-lite-agent-panel
 sudo journalctl -u 3xui-lite-agent-panel -f
 ```
+
+标准部署会在安装终端直接显示一次性随机密码，不把密码写入 systemd 环境。若绕过安装器、由服务自身完成兜底初始化，可执行 `sudo journalctl -u 3xui-lite-agent-panel -n 50 --no-pager` 查看首次启动输出；`systemctl status` 不保证保留完整的首次日志。
 
 ## 管理入口与防火墙
 
@@ -52,7 +60,7 @@ sudo PORT=8443 bash ./deploy-linux.sh
 
 ## 安全建议
 
-- 首次登录使用 `admin / admin`；面板会强制修改默认密码后才开放其他管理功能。
+- 新安装会在当前终端一次性显示管理员账号 `admin` 和随机初始密码；首次登录必须修改密码后才开放其他管理功能。
 - 面板公开访问前请配置 HTTPS。
 - 防火墙只开放面板端口，以及明确启用的节点和中转端口。
 - 运行时数据（`settings.json`、`audit.json`、节点和用户数据、Agent 令牌）会被刻意排除在源码包和仓库之外。

@@ -1,4 +1,4 @@
-# 3xUI Lite Agent Panel v0.7.1
+# 3xUI Lite Agent Panel v0.7.2
 
 面向 Linux VPS 的 Xray 管理与中转面板，提供协议配置模板、流量统计、Agent 管理、远程 TCP/UDP 中转、远程入站下发、Agent 自更新，以及远程安装 Xray Core 等能力。
 
@@ -10,7 +10,7 @@
 curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/main/install.sh | sudo bash
 ```
 
-安装程序会在必要时安装 Node.js 20 LTS、安装项目依赖，并启动监听 `3000` 端口的 `3xui-lite-agent-panel` systemd 服务。
+安装程序仅支持仍在维护的 Node.js 22 LTS 或 24 LTS，并会在必要时安装 Node.js 24 LTS，然后启动监听 `3000` 端口的 `3xui-lite-agent-panel` systemd 服务。
 
 该默认命令适合已限制来源地址的管理网络。不要将 HTTP 管理端口向 `0.0.0.0/0` 开放；生产环境应优先使用 HTTPS 反向代理，并把面板仅绑定到回环地址：
 
@@ -25,13 +25,34 @@ sudo systemctl status 3xui-lite-agent-panel
 sudo journalctl -u 3xui-lite-agent-panel -f
 ```
 
+标准安装器会在当前终端直接显示一次性随机密码，不把它写入 systemd 环境。仅在绕过安装器、由服务自身完成兜底初始化时，才需使用 `sudo journalctl -u 3xui-lite-agent-panel -n 50 --no-pager` 查看首次启动输出。
+
 指定其他面板端口：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/main/install.sh | sudo PORT=8443 bash
 ```
 
-初始账号密码为 `admin / admin`。首次登录后，面板会强制修改默认密码；完成前其他管理 API 保持锁定。
+新安装会在安装终端中一次性显示管理员账号 `admin` 和随机初始密码；请立即保存并在首次登录后修改。升级不会重新生成或覆盖现有管理员凭据，完成密码修改前其他管理 API 保持锁定。
+
+再次执行安装命令升级时，脚本会先在临时目录按锁文件安装依赖、禁用依赖安装脚本并完成语法检查；已有的端口、监听地址以及 Cookie/代理安全设置会继续沿用，除非在升级命令中显式覆盖。
+
+自定义 `APP_DIR` 必须使用独立的非符号链接应用目录，例如 `/opt/3xui-lite-agent-panel`；从根目录到目标目录的每一级现有目录都必须由 `root:root` 所有且不可由组/其他用户写入，安装器也会拒绝根目录、关键系统目录及可造成 systemd 单元转义或路径绕过的值。
+
+部署完成后，本轮发布的应用源码和依赖归 `root:root` 所有，组及其他用户写权限会被移除；已知敏感数据文件固定为 `0600`。升级失败时会恢复这些文件原有的所有权和权限。
+
+默认一键安装脚本固定下载 `v0.7.2` 标签。受控生产发布可将 `install.sh` 原始地址中的 `main` 固定为经过审核的完整 Git commit SHA，并通过 `REF` 指定同一标签或提交；如需跟随分支可显式传入 `BRANCH`。还可传入 `SOURCE_SHA256` 对下载的源码包进行 SHA-256 校验。
+
+## v0.7.2 商用可靠性与安全加固
+
+- 新安装改用一次性随机管理员密码；部署器不再把凭据写入 systemd 环境，面板兜底初始化也只在首次启动日志中显示一次。
+- Agent 控制通道默认强制 HTTPS，仅允许回环地址使用 HTTP；授权撤销或不安全通道会立即停止远程入站和中转。
+- Agent 更新及 Xray 安装任务采用持久化的一次性结果，失败或中断后不会在每次心跳中重复下载；任务错误会回传面板。
+- 用户配额降低或耗尽时立即停用账号并移除节点访问；修复小数配额、当地日期统计和当日流量展示精度。
+- TLS 证书保存前验证 PEM 与密钥配对；损坏的持久化证书不再阻止面板以 HTTP 安全启动，运行时文件采用校验后原子发布。
+- 部署升级改为源码、依赖与 systemd 单元的事务式发布；启动失败自动恢复上一版本，并保留现有网络和 Cookie/代理安全设置。
+- 完善键盘焦点、弹窗清理、移动端侧栏隔离、操作状态及安全检查展示，减少误操作和敏感信息残留。
+- 面板升级为 v0.7.2，Agent 升级为 v0.5.5；运行环境限定为仍受维护的 Node.js 22 LTS 或 24 LTS。
 
 ## v0.7.1 可靠性修复
 
@@ -44,11 +65,11 @@ curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/m
 
 ## v0.7 商用运维基线
 
-- **强制默认密码迁移**：自动识别仍在使用 `admin / admin` 的历史安装；修改密码前锁定其他管理接口。
+- **一次性初始凭据**：新安装生成高强度随机初始密码并强制首次修改；历史默认凭据仍会被识别并在修改前锁定其他管理接口。
 - **管理员操作审计**：记录登录成功/失败、配置写操作、响应状态、来源 IP 和客户端信息，私有保存最近 1,000 条。
 - **完整配置备份**：系统页可导出账号哈希、Agent 令牌、节点、用户、流量和审计记录，并附带 SHA-256 完整性校验。备份含敏感凭据，应仅通过 HTTPS 下载并离线加密保存。
 - **跨站写入保护**：浏览器写操作校验 Origin/Host，配合 `SameSite=Strict` Cookie 降低跨站请求风险。
-- **安全状态总览**：系统页集中显示默认密码、HTTPS、Secure Cookie 和审计状态。
+- **安全状态总览**：系统页集中显示首次凭据、HTTPS、Secure Cookie、审计和 Agent 控制链路状态。
 - **数据引用保护**：仍承载资源的 Agent、仍分配给用户的入站不能直接删除，避免产生悬空配置。
 - **部署加固**：systemd 服务增加内核、SUID、地址族、资源上限和停止超时限制。
 ## 管理入口与防火墙
@@ -79,11 +100,11 @@ sudo bash ./deploy-linux.sh
 
 ## Agent 运行要求
 
-Agent 通过 systemd 服务部署。它可以接收面板下发的 Xray 安装、节点配置及中转规则。部署引导会自动检查并安装 Node.js 20 LTS，因此纯净的常见 Linux VPS 也可直接执行部署命令。Agent 端自动安装 Xray 当前支持 Linux x64、arm64 和 arm 架构。面板本机也支持从系统页面安装官方 Xray Core；版本可填写 `v26.3.27`、`26.3.27`，或留空安装最新版。
+Agent 通过 systemd 服务部署。它可以接收面板下发的 Xray 安装、节点配置及中转规则。部署引导会自动检查 Node.js 版本，并在必要时安装 Node.js 24 LTS，因此纯净的常见 Linux VPS 也可直接执行部署命令。Agent 端自动安装 Xray 当前支持 Linux x64、arm64 和 arm 架构。面板本机也支持从系统页面安装官方 Xray Core；版本可填写 `v26.3.27`、`26.3.27`，或留空安装最新版。
 
 ## 安全建议
 
-- 首次登录后立刻修改默认 `admin / admin` 密码。
+- 首次登录后立刻修改安装终端显示的一次性随机密码。
 - 对外暴露前请通过反向代理或证书配置 HTTPS。
 - 防火墙仅放行面板端口，以及实际启用的节点或中转端口。
 - 运行时数据、节点配置、审计记录和 Agent 令牌均不会被提交到仓库或包含在发布源码中。
@@ -107,7 +128,7 @@ Agent 下发多个入站时会逐一确认所有监听端口，不再只检查�
 
 用户到期后，面板会在启动时、每分钟及 API 操作时自动停用该用户，并从已分配的 Xray 入站移除访问凭据。用户卡片会显示“已到期”，点击“编辑”可调整到期日或流量配额；设置为未来日期后即可重新启用。无效日期（例如 `2026-02-30`）会被拒绝，不会被自动转换为其他日期。
 
-Agent 如在 Xray 安装过程中异常中断，重启后会自动解除残留的“安装中”状态，允许面板重新下发安装任务。
+Agent 如在 Xray 安装或自身更新过程中异常中断，重启后会将该任务标记为失败并回传面板，等待管理员明确重新下发，避免反复下载或更新循环。
 
 ## Let's Encrypt 证书申请
 
@@ -119,6 +140,6 @@ TLS、WebSocket、gRPC 和 Trojan 模板不会再在缺少证书时写入会使 
 
 - 不要直接把 HTTP 面板暴露到公网；使用 Nginx、Caddy 或负载均衡器提供 HTTPS，并将面板端口限制为反向代理或管理网段可访问。
 - HTTPS 反向代理场景可用 `SECURE_COOKIE=true TRUST_PROXY=true` 部署，使管理员会话 Cookie 仅通过 HTTPS 发送，并信任反向代理的 HTTPS 标记：`curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/main/install.sh | sudo PANEL_HOST=127.0.0.1 SECURE_COOKIE=true TRUST_PROXY=true bash`。面板端口必须同时限制为仅反向代理可访问。
-- 首次登录后必须修改默认管理员密码；完成前面板会拦截其他管理操作。
+- 首次登录后必须修改安装终端显示的一次性初始密码；完成前面板会拦截其他管理操作。
 - 面板数据采用私有文件权限和原子写入；仍应对 `/opt/3xui-lite-agent-panel` 中的运行数据定期离机备份，并在升级前创建快照。
 - 建议仅放行面板 HTTPS、已启用节点端口和必要的 Agent 回连路径；Agent 令牌、管理员 Cookie 与节点 JSON 都应视为敏感凭据。

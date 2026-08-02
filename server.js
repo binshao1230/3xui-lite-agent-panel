@@ -1,6 +1,7 @@
 'use strict';
 const http = require('node:http');
 const https = require('node:https');
+const tls = require('node:tls');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
@@ -19,10 +20,13 @@ const runtimeFile = path.join(root, 'runtime-xray.json');
 const settingFile = path.join(root, 'settings.json');
 const auditFile = path.join(root, 'audit.json');
 const port = Number(process.env.PORT || 3000);
-const PANEL_VERSION = '0.7.1';
+const PANEL_VERSION = '0.7.2';
 const sessions = new Map();
 const loginAttempts = new Map();
+let generatedInitialAdminPassword = '';
 const runtime = { child: null, startedAt: '', lastError: '', lastLog: '', installing: false };
+let runtimeOperationTail = Promise.resolve();
+let runtimeInstallQueued = false;
 const networkState = { publicAddress: '', source: '', checkedAt: '', error: '', checking: false };
 const relayRuntimes = new Map();
 const publicFiles = new Set(['index.html', 'style.css', 'app.js', 'agent.js']);
@@ -42,13 +46,27 @@ function token(bytes = 16) { return crypto.randomBytes(bytes).toString('base64ur
 let lastGeneratedId = 0;
 function id() { const now = Date.now() * 1000; lastGeneratedId = Math.max(now, lastGeneratedId + 1); return lastGeneratedId; }
 function passwordHash(password, salt = token(16)) { return { salt, hash: crypto.scryptSync(password, salt, 64).toString('base64') }; }
+function validAdminPasswordRecord(admin) {
+  if (!admin || typeof admin !== 'object' || !validText(admin.username, 64) || typeof admin.salt !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(admin.salt) || typeof admin.hash !== 'string') return false;
+  try { const decoded = Buffer.from(admin.hash, 'base64'); return decoded.length === 64 && decoded.toString('base64') === admin.hash; } catch { return false; }
+}
 function usesDefaultPassword(admin) {
   if (!admin?.salt || !admin?.hash) return true;
   const expected = passwordHash('admin', admin.salt).hash;
   return expected.length === admin.hash.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(admin.hash));
 }
 function defaultSettings() {
-  return { admin: { username: 'admin', ...passwordHash('admin'), mustChangePassword: true, defaultPassword: true, defaultPasswordChecked: true }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '' } };
+  const configured = process.env.INITIAL_ADMIN_PASSWORD;
+  if (configured !== undefined && (configured.length < 10 || configured.length > 128)) throw new Error('INITIAL_ADMIN_PASSWORD 必须为 10–128 个字符');
+  const password = configured || token(24); generatedInitialAdminPassword = password;
+  return { admin: { username: 'admin', ...passwordHash(password), mustChangePassword: true, defaultPassword: false, defaultPasswordChecked: true }, tls: { domain: '', email: '', certPath: '', keyPath: '', updatedAt: '' } };
+}
+function announceInitialAdminPassword() {
+  if (!generatedInitialAdminPassword) return;
+  console.log(`[security] 首次管理员账号：admin`);
+  console.log(`[security] 一次性初始密码：${generatedInitialAdminPassword}`);
+  console.log('[security] 此密码仅显示一次；登录后必须立即修改。');
+  generatedInitialAdminPassword = '';
 }
 function dataFileError(file, error, expected = '有效 JSON') {
   const problem = new Error(`${path.basename(file)} 无法读取或不是${expected}；已保留原文件，请修复后重试`);
@@ -57,7 +75,7 @@ function dataFileError(file, error, expected = '有效 JSON') {
 function readSettings() {
   try {
     const data = JSON.parse(fs.readFileSync(settingFile, 'utf8'));
-    if (data?.admin?.salt && data?.admin?.hash) {
+    if (validAdminPasswordRecord(data?.admin)) {
       const admin = { username: 'admin', ...data.admin };
       if (admin.defaultPasswordChecked !== true) { admin.defaultPassword = usesDefaultPassword(admin); admin.defaultPasswordChecked = true; admin.mustChangePassword = Boolean(admin.mustChangePassword || admin.defaultPassword); writeSettings({ ...data, admin }); }
       admin.defaultPassword = Boolean(admin.defaultPassword); admin.mustChangePassword = Boolean(admin.mustChangePassword || admin.defaultPassword);
@@ -443,8 +461,29 @@ function createUser(data) {
   if (!Number.isFinite(limitGB) || limitGB <= 0) return null;
   return { id: id(), name: data.name.trim(), email, limitGB: Math.round(limitGB * 1000) / 1000, usedGB: 0, expire, status: 'running', createdAt: new Date().toISOString(), access: [] };
 }
-function controllerUrl(value) {
-  try { const url = new URL(String(value || '')); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return ''; return url.toString().replace(/\/$/, ''); } catch { return ''; }
+function controllerHostIsLoopback(hostname) {
+  const host = String(hostname || '').replace(/^\[|\]$/g, '').toLowerCase();
+  return host === 'localhost' || host === '::1' || (net.isIP(host) === 4 && host.split('.')[0] === '127');
+}
+function controllerUrl(value, legacy = false) {
+  try {
+    const url = new URL(String(value || ''));
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return '';
+    if (!legacy && (url.pathname !== '/' || url.search || url.hash || (url.protocol === 'http:' && !controllerHostIsLoopback(url.hostname)))) return '';
+    return url.toString().replace(/\/$/, '');
+  } catch { return ''; }
+}
+function controllerUrlSecure(value) { return Boolean(controllerUrl(value)); }
+function socketAddressIsLoopback(address) {
+  const value = String(address || '').replace(/^::ffff:/, '');
+  return value === '::1' || (net.isIP(value) === 4 && value.split('.')[0] === '127');
+}
+function agentHeartbeatTransportSecure(req, agent) {
+  if (requestIsSecure(req)) return true;
+  try {
+    const target = new URL(agent.controllerUrl);
+    return target.protocol === 'http:' && controllerHostIsLoopback(target.hostname) && socketAddressIsLoopback(req.socket?.remoteAddress);
+  } catch { return false; }
 }
 function normalizeAgentInboundStates(items) {
   if (!Array.isArray(items)) return [];
@@ -455,10 +494,10 @@ function normalizeAgentInboundStates(items) {
 }
 function normalizeAgent(item) {
   if (!item || typeof item !== 'object' || !validText(item.id, 80) || !validText(item.token, 160)) return null;
-  return { id: item.id, token: item.token, name: cleanText(item.name, 'Unnamed Agent', 80), controllerUrl: controllerUrl(item.controllerUrl), enabled: item.enabled !== false, version: cleanText(item.version, '', 60), hostname: cleanText(item.hostname, '', 120), platform: cleanText(item.platform, '', 80), arch: cleanText(item.arch, '', 40), nodeVersion: cleanText(item.nodeVersion, '', 40), uptimeSeconds: Math.max(0, Number(item.uptimeSeconds || 0)), memoryTotal: Math.max(0, Number(item.memoryTotal || 0)), memoryFree: Math.max(0, Number(item.memoryFree || 0)), cpus: Math.max(0, Number(item.cpus || 0)), addresses: Array.isArray(item.addresses) ? item.addresses.filter(value => validText(value, 80)).slice(0, 20) : [], processId: Math.max(0, Number(item.processId || 0)), agentStartedAt: cleanText(item.agentStartedAt, '', 64), updateRequestId: cleanText(item.updateRequestId, '', 64), updateRequestedAt: cleanText(item.updateRequestedAt, '', 64), lastUpdatedAt: cleanText(item.lastUpdatedAt, '', 64), xrayAvailable: item.xrayAvailable === true, xrayVersion: cleanText(item.xrayVersion, '', 100), xrayInstallRequestId: cleanText(item.xrayInstallRequestId, '', 64), xrayInstallRequestedAt: cleanText(item.xrayInstallRequestedAt, '', 64), xrayInstalling: item.xrayInstalling === true, xrayInstallError: cleanText(item.xrayInstallError, '', 500), xrayInstalledAt: cleanText(item.xrayInstalledAt, '', 64), inboundStates: normalizeAgentInboundStates(item.inboundStates), lastSeenAt: cleanText(item.lastSeenAt, '', 64), createdAt: cleanText(item.createdAt, new Date().toISOString(), 64), updatedAt: cleanText(item.updatedAt, '', 64), relayStates: normalizeAgentRelayStates(item.relayStates) };
+  return { id: item.id, token: item.token, name: cleanText(item.name, 'Unnamed Agent', 80), controllerUrl: controllerUrl(item.controllerUrl, true), enabled: item.enabled !== false, version: cleanText(item.version, '', 60), hostname: cleanText(item.hostname, '', 120), platform: cleanText(item.platform, '', 80), arch: cleanText(item.arch, '', 40), nodeVersion: cleanText(item.nodeVersion, '', 40), uptimeSeconds: Math.max(0, Number(item.uptimeSeconds || 0)), memoryTotal: Math.max(0, Number(item.memoryTotal || 0)), memoryFree: Math.max(0, Number(item.memoryFree || 0)), cpus: Math.max(0, Number(item.cpus || 0)), addresses: Array.isArray(item.addresses) ? item.addresses.filter(value => validText(value, 80)).slice(0, 20) : [], processId: Math.max(0, Number(item.processId || 0)), agentStartedAt: cleanText(item.agentStartedAt, '', 64), updateRequestId: cleanText(item.updateRequestId, '', 64), updateRequestedAt: cleanText(item.updateRequestedAt, '', 64), updateError: cleanText(item.updateError, '', 500), lastUpdatedAt: cleanText(item.lastUpdatedAt, '', 64), xrayAvailable: item.xrayAvailable === true, xrayVersion: cleanText(item.xrayVersion, '', 100), xrayInstallRequestId: cleanText(item.xrayInstallRequestId, '', 64), xrayInstallRequestedAt: cleanText(item.xrayInstallRequestedAt, '', 64), xrayInstalling: item.xrayInstalling === true, xrayInstallError: cleanText(item.xrayInstallError, '', 500), xrayInstalledAt: cleanText(item.xrayInstalledAt, '', 64), inboundStates: normalizeAgentInboundStates(item.inboundStates), lastSeenAt: cleanText(item.lastSeenAt, '', 64), createdAt: cleanText(item.createdAt, new Date().toISOString(), 64), updatedAt: cleanText(item.updatedAt, '', 64), lastHeartbeatSecure: item.lastHeartbeatSecure === false ? false : item.lastHeartbeatSecure === true ? true : null, relayStates: normalizeAgentRelayStates(item.relayStates) };
 }function readAgents() { return readStore(agentFile, [], normalizeAgent).filter(Boolean); }
 function agentStatus(agent) { if (!agent.enabled) return 'disabled'; const seen = Date.parse(agent.lastSeenAt || ''); return Number.isFinite(seen) && Date.now() - seen < 90 * 1000 ? 'online' : 'offline'; }
-function agentPublic(agent) { const { token: hidden, updateRequestId: hiddenUpdate, xrayInstallRequestId: hiddenXrayInstall, ...safe } = agent; return { ...safe, status: agentStatus(agent), updatePending: Boolean(agent.updateRequestId), xrayInstallPending: Boolean(agent.xrayInstallRequestId) }; }
+function agentPublic(agent) { const { token: hidden, updateRequestId: hiddenUpdate, xrayInstallRequestId: hiddenXrayInstall, ...safe } = agent; return { ...safe, controllerSecure: controllerUrlSecure(agent.controllerUrl) && agent.lastHeartbeatSecure !== false, status: agentStatus(agent), updatePending: Boolean(agent.updateRequestId), xrayInstallPending: Boolean(agent.xrayInstallRequestId) }; }
 function secureTokenMatch(expected, actual) { if (typeof actual !== 'string' || expected.length !== actual.length) return false; return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual)); }
 function agentServiceName(agent) { return `3xui-lite-agent-${agent.id}`; }
 function agentInstallScript(agent) {
@@ -469,18 +508,34 @@ install_dir=${JSON.stringify(installDir)}
 service_file=${JSON.stringify(serviceFile)}
 environment_file=${JSON.stringify(environmentFile)}
 install_node() {
-  if command -v node >/dev/null 2>&1 && [ "$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)" -ge 18 ]; then return; fi
-  echo "正在安装 Node.js 20 LTS..."
-  if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y ca-certificates curl && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs
-  elif command -v dnf >/dev/null 2>&1; then dnf install -y ca-certificates curl && curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - && dnf install -y nodejs
-  elif command -v yum >/dev/null 2>&1; then yum install -y ca-certificates curl && curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - && yum install -y nodejs
-  elif command -v apk >/dev/null 2>&1; then apk add --no-cache nodejs npm
-  else echo "未找到受支持的软件包管理器，请先安装 Node.js 18 或更高版本。"; exit 1; fi
+  if command -v node >/dev/null 2>&1; then
+    node_major="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)"
+    if [ "$node_major" -eq 22 ] || [ "$node_major" -eq 24 ]; then return; fi
+  fi
+  echo "正在安装 Node.js 24 LTS..."
+  if command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y ca-certificates curl && curl --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 15 --max-time 120 -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs
+  elif command -v dnf >/dev/null 2>&1; then dnf install -y ca-certificates curl && curl --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 15 --max-time 120 -fsSL https://rpm.nodesource.com/setup_24.x | bash - && dnf install -y nodejs
+  elif command -v yum >/dev/null 2>&1; then yum install -y ca-certificates curl && curl --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 15 --max-time 120 -fsSL https://rpm.nodesource.com/setup_24.x | bash - && yum install -y nodejs
+  elif command -v apk >/dev/null 2>&1; then apk add --no-cache nodejs npm curl ca-certificates
+  else echo "未找到受支持的软件包管理器，请先安装 Node.js 22 LTS 或 24 LTS。"; exit 1; fi
 }
 install_node
+node_major=0
+if command -v node >/dev/null 2>&1; then node_major="$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)"; fi
+if [ "$node_major" -ne 22 ] && [ "$node_major" -ne 24 ]; then echo "Agent 仅支持 Node.js 22 或 24 LTS。"; exit 1; fi
 if ! command -v curl >/dev/null 2>&1; then echo "缺少 curl，无法下载 Agent 脚本。"; exit 1; fi
 mkdir -p "$install_dir"
-curl -fsSL ${JSON.stringify(`${agent.controllerUrl}/agent.js`)} -o "$install_dir/agent.js"
+agent_tmp_base="$(mktemp "$install_dir/.agent.XXXXXX")"
+agent_tmp="$agent_tmp_base.js"
+cleanup_agent_tmp() { rm -f "$agent_tmp_base" "$agent_tmp"; }
+trap cleanup_agent_tmp EXIT
+mv -f "$agent_tmp_base" "$agent_tmp"
+chmod 600 "$agent_tmp"
+curl --retry 5 --retry-delay 2 --retry-connrefused --connect-timeout 15 --max-time 120 -fsSL ${JSON.stringify(`${agent.controllerUrl}/agent.js`)} -o "$agent_tmp"
+node --check "$agent_tmp"
+chmod 700 "$agent_tmp"
+mv -f "$agent_tmp" "$install_dir/agent.js"
+trap - EXIT
 printf '%s' ${JSON.stringify(environmentPayload)} | base64 -d > "$environment_file"
 chmod 600 "$environment_file"
 cat > "$service_file" <<'UNIT'
@@ -523,22 +578,46 @@ function agentInboundTasks(agentId) {
 }
 async function handleAgentGateway(req, res, parts) {
   if (parts.length !== 3 || parts[2] !== 'heartbeat' || req.method !== 'POST') return json(res, 404, { error: 'Not found' });
-  const data = await body(req); const agentId = cleanText(data.id, '', 80); const supplied = cleanText(data.token, '', 160); const agents = readAgents(); const agent = agents.find(item => item.id === agentId);
+  const data = await body(req); const agentId = cleanText(data.id, '', 80); const supplied = cleanText(data.token, '', 160); let agents = readAgents(); let agent = agents.find(item => item.id === agentId);
+  if (!agent || !secureTokenMatch(agent.token, supplied)) return json(res, 401, { error: 'Agent 身份验证失败' });
+  if (!agent.enabled) return json(res, 403, { error: '该 Agent 已被面板停用' });
+  if (!controllerUrlSecure(agent.controllerUrl) || !agentHeartbeatTransportSecure(req, agent)) {
+    agent.lastHeartbeatSecure = false; agent.updatedAt = new Date().toISOString(); writeStore(agentFile, agents);
+    return json(res, 426, { error: 'Agent 控制通道不安全：请将控制面板地址迁移到 HTTPS（仅本机回环地址允许 HTTP）', code: 'CONTROLLER_HTTPS_REQUIRED' });
+  }
+  await reconcileExpiredUsers();
+  agents = readAgents(); agent = agents.find(item => item.id === agentId);
   if (!agent || !secureTokenMatch(agent.token, supplied)) return json(res, 401, { error: 'Agent 身份验证失败' });
   if (!agent.enabled) return json(res, 403, { error: '该 Agent 已被面板停用' });
   const info = data.info && typeof data.info === 'object' ? data.info : data;
-  if (agent.updateRequestId && cleanText(info.updateAck, '', 64) === agent.updateRequestId) { agent.lastUpdatedAt = new Date().toISOString(); agent.updateRequestId = ''; agent.updateRequestedAt = ''; }
-  if (agent.xrayInstallRequestId && cleanText(info.xrayInstallAck, '', 64) === agent.xrayInstallRequestId) { agent.xrayInstalledAt = new Date().toISOString(); agent.xrayInstallRequestId = ''; agent.xrayInstallRequestedAt = ''; agent.xrayInstallError = ''; }
-  agent.version = cleanText(info.version, agent.version, 60); agent.hostname = cleanText(info.hostname, agent.hostname, 120); agent.platform = cleanText(info.platform, agent.platform, 80); agent.arch = cleanText(info.arch, agent.arch, 40); agent.nodeVersion = cleanText(info.nodeVersion, agent.nodeVersion, 40); agent.uptimeSeconds = Math.max(0, Number(info.uptimeSeconds || 0)); agent.memoryTotal = Math.max(0, Number(info.memoryTotal || 0)); agent.memoryFree = Math.max(0, Number(info.memoryFree || 0)); agent.cpus = Math.max(0, Number(info.cpus || 0)); agent.addresses = Array.isArray(info.addresses) ? info.addresses.filter(value => validText(value, 80)).slice(0, 20) : []; agent.processId = Math.max(0, Number(info.processId || 0)); agent.agentStartedAt = cleanText(info.agentStartedAt, agent.agentStartedAt, 64); agent.xrayAvailable = info.xrayAvailable === true; agent.xrayVersion = cleanText(info.xrayVersion, agent.xrayVersion, 100); agent.xrayInstalling = info.xrayInstalling === true; agent.xrayInstallError = cleanText(info.xrayInstallError, '', 500); agent.inboundStates = normalizeAgentInboundStates(info.inboundStates); agent.relayStates = normalizeAgentRelayStates(info.relayStates); agent.lastSeenAt = new Date().toISOString(); agent.updatedAt = agent.lastSeenAt;
+  const updateAck = cleanText(info.updateAck, '', 64); const updateFailedId = cleanText(info.updateFailedId, '', 64); const updateError = cleanText(info.updateError, '', 500);
+  if (agent.updateRequestId && updateAck === agent.updateRequestId) { agent.lastUpdatedAt = new Date().toISOString(); agent.updateRequestId = ''; agent.updateRequestedAt = ''; agent.updateError = ''; }
+  else if (agent.updateRequestId && updateFailedId === agent.updateRequestId) { agent.updateRequestId = ''; agent.updateRequestedAt = ''; agent.updateError = updateError || 'Agent 更新失败'; }
+  const xrayInstallAck = cleanText(info.xrayInstallAck, '', 64); const xrayInstallFailedId = cleanText(info.xrayInstallFailedId, '', 64); const xrayInstallError = cleanText(info.xrayInstallError, '', 500);
+  if (agent.xrayInstallRequestId && xrayInstallAck === agent.xrayInstallRequestId) { agent.xrayInstalledAt = new Date().toISOString(); agent.xrayInstallRequestId = ''; agent.xrayInstallRequestedAt = ''; agent.xrayInstallError = ''; }
+  else if (agent.xrayInstallRequestId && xrayInstallFailedId === agent.xrayInstallRequestId) { agent.xrayInstallRequestId = ''; agent.xrayInstallRequestedAt = ''; agent.xrayInstallError = xrayInstallError || 'Xray Core 安装失败'; }
+  agent.version = cleanText(info.version, agent.version, 60); agent.hostname = cleanText(info.hostname, agent.hostname, 120); agent.platform = cleanText(info.platform, agent.platform, 80); agent.arch = cleanText(info.arch, agent.arch, 40); agent.nodeVersion = cleanText(info.nodeVersion, agent.nodeVersion, 40); agent.uptimeSeconds = Math.max(0, Number(info.uptimeSeconds || 0)); agent.memoryTotal = Math.max(0, Number(info.memoryTotal || 0)); agent.memoryFree = Math.max(0, Number(info.memoryFree || 0)); agent.cpus = Math.max(0, Number(info.cpus || 0)); agent.addresses = Array.isArray(info.addresses) ? info.addresses.filter(value => validText(value, 80)).slice(0, 20) : []; agent.processId = Math.max(0, Number(info.processId || 0)); agent.agentStartedAt = cleanText(info.agentStartedAt, agent.agentStartedAt, 64); agent.xrayAvailable = info.xrayAvailable === true; agent.xrayVersion = cleanText(info.xrayVersion, agent.xrayVersion, 100); agent.xrayInstalling = info.xrayInstalling === true; agent.inboundStates = normalizeAgentInboundStates(info.inboundStates); agent.relayStates = normalizeAgentRelayStates(info.relayStates); agent.lastHeartbeatSecure = true; agent.lastSeenAt = new Date().toISOString(); agent.updatedAt = agent.lastSeenAt;
   writeStore(agentFile, agents); return json(res, 200, { ok: true, intervalSeconds: 15, relays: agentRelayTasks(agent.id), inbounds: agentInboundTasks(agent.id), xrayInstall: agent.xrayInstallRequestId ? { id: agent.xrayInstallRequestId, version: 'latest' } : null, update: agent.updateRequestId ? { id: agent.updateRequestId, url: `${agent.controllerUrl}/agent.js` } : null, agent: agentPublic(agent) });
 }async function handleAgents(req, res, parts) {
   const agentId = cleanText(parts[2], '', 80);
   if (parts.length === 2 && req.method === 'GET') return json(res, 200, readAgents().map(agentPublic));
-  if (parts.length === 2 && req.method === 'POST') { const agent = createAgent(await body(req)); if (!agent) return json(res, 400, { error: '请填写机器名称和可被远程访问的控制面板地址（HTTP/HTTPS）' }); const agents = readAgents(); agents.unshift(agent); writeStore(agentFile, agents); return json(res, 201, { agent: agentPublic(agent), deployment: { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } }); }
+  if (parts.length === 2 && req.method === 'POST') {
+    const data = await body(req);
+    if (!cleanText(data.name, '', 80)) return json(res, 400, { error: '机器名称不能为空' });
+    if (!controllerUrl(data.controllerUrl)) return json(res, 400, { error: '控制面板地址必须为无账号、无路径、无查询参数的 HTTPS 根地址；仅 localhost、127.0.0.0/8 或 [::1] 可使用 HTTP' });
+    const agent = createAgent(data); const agents = readAgents(); agents.unshift(agent); writeStore(agentFile, agents); return json(res, 201, { agent: agentPublic(agent), deployment: { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } });
+  }
   const patchData = req.method === 'PATCH' ? await body(req) : null; const agents = readAgents(); const agent = agents.find(item => item.id === agentId); if (!agent) return json(res, 404, { error: 'Not found' });
-  if (parts.length === 5 && parts[3] === 'xray' && parts[4] === 'install' && req.method === 'POST') { agent.xrayInstallRequestId = token(12); agent.xrayInstallRequestedAt = new Date().toISOString(); agent.xrayInstallError = ''; agent.updatedAt = agent.xrayInstallRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发 Xray Core 安装任务，等待 Agent 执行。' }); }  if (parts.length === 4 && parts[3] === 'update' && req.method === 'POST') { agent.updateRequestId = token(12); agent.updateRequestedAt = new Date().toISOString(); agent.updatedAt = agent.updateRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发更新请求，等待 Agent 心跳执行。' }); }
+  if (parts.length === 5 && parts[3] === 'xray' && parts[4] === 'install' && req.method === 'POST') {
+    if (agent.xrayInstallRequestId) return json(res, 409, { error: '该 Agent 已有待执行的 Xray Core 安装任务', agent: agentPublic(agent) });
+    agent.xrayInstallRequestId = token(12); agent.xrayInstallRequestedAt = new Date().toISOString(); agent.xrayInstallError = ''; agent.updatedAt = agent.xrayInstallRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发 Xray Core 安装任务，等待 Agent 执行。' });
+  }
+  if (parts.length === 4 && parts[3] === 'update' && req.method === 'POST') {
+    if (agent.updateRequestId) return json(res, 409, { error: '该 Agent 已有待执行的更新任务', agent: agentPublic(agent) });
+    agent.updateRequestId = token(12); agent.updateRequestedAt = new Date().toISOString(); agent.updateError = ''; agent.updatedAt = agent.updateRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发更新请求，等待 Agent 心跳执行。' });
+  }
   if (parts.length === 4 && parts[3] === 'bootstrap' && req.method === 'GET') { auditOnFinish(req, res, currentSession(req), 'admin.agent.bootstrap.read', `/api/agents/${agent.id}/bootstrap`); return json(res, 200, { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token }); }
-  if (req.method === 'PATCH') { const data = patchData; if (data.enabled !== undefined) agent.enabled = Boolean(data.enabled); if (data.controllerUrl !== undefined) { const target = controllerUrl(data.controllerUrl); if (!target) return json(res, 400, { error: '控制面板地址必须是有效的 HTTP/HTTPS 地址' }); agent.controllerUrl = target; } if (data.name !== undefined) { const name = cleanText(data.name, '', 80); if (!name) return json(res, 400, { error: '机器名称不能为空' }); agent.name = name; } if (data.rotateToken === true) agent.token = token(32); agent.updatedAt = new Date().toISOString(); writeStore(agentFile, agents); return json(res, 200, { agent: agentPublic(agent), deployment: (data.rotateToken === true || data.controllerUrl !== undefined) ? { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } : undefined }); }
+  if (req.method === 'PATCH') { const data = patchData; if (data.enabled !== undefined) agent.enabled = Boolean(data.enabled); if (data.controllerUrl !== undefined) { const target = controllerUrl(data.controllerUrl); if (!target) return json(res, 400, { error: '控制面板地址必须为无账号、无路径、无查询参数的 HTTPS 根地址；仅 localhost、127.0.0.0/8 或 [::1] 可使用 HTTP' }); agent.controllerUrl = target; } if (data.name !== undefined) { const name = cleanText(data.name, '', 80); if (!name) return json(res, 400, { error: '机器名称不能为空' }); agent.name = name; } if (data.rotateToken === true) agent.token = token(32); agent.updatedAt = new Date().toISOString(); writeStore(agentFile, agents); return json(res, 200, { agent: agentPublic(agent), deployment: (data.rotateToken === true || data.controllerUrl !== undefined) ? { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } : undefined }); }
   if (req.method === 'DELETE') { const assignedInbounds = readStore(inboundFile, seedInbounds, normalizeInbound).filter(item => item.agentId === agentId); const assignedRelays = readStore(relayFile, seedRelays, normalizeRelay).filter(item => item.agentId === agentId); if (assignedInbounds.length || assignedRelays.length) return json(res, 409, { error: '该 Agent 仍承载 ' + assignedInbounds.length + ' 个入站和 ' + assignedRelays.length + ' 条中转，请先迁移或删除这些资源' }); writeStore(agentFile, agents.filter(item => item.id !== agentId)); return json(res, 204); }
   return json(res, 405, { error: 'Method not allowed' });
 }function normalizeRelay(item) {
@@ -546,26 +625,26 @@ async function handleAgentGateway(req, res, parts) {
   if (Number.isInteger(Number(item.listenPort)) && validText(item.targetHost) && Number.isInteger(Number(item.targetPort))) return { ...item, listenPort: Number(item.listenPort), targetPort: Number(item.targetPort), transport: ['tcp', 'udp', 'tcp+udp'].includes(item.transport) ? item.transport : 'tcp', bindAddress: cleanText(item.bindAddress, '0.0.0.0', 80), agentId: cleanText(item.agentId, '', 80), runtimeStatus: item.runtimeStatus || 'stopped', lastError: item.lastError || '', bytesIn: Number(item.bytesIn || 0), bytesOut: Number(item.bytesOut || 0), connections: Number(item.connections || 0) };
   return { ...item, transport: item.transport || 'tcp', listenPort: null, targetHost: '', targetPort: null, agentId: '', runtimeStatus: 'legacy', lastError: '旧版线路档案：请新建含监听端口与目标地址的转发规则。', bytesIn: 0, bytesOut: 0, connections: 0 };
 }
-function remoteRelaySnapshot(rule) {
-  const agent = readAgents().find(item => item.id === rule.agentId); const agentState = agent?.relayStates?.find(item => item.id === rule.id);
+function remoteRelaySnapshot(rule, context) {
+  const agent = context?.agentsById ? context.agentsById.get(rule.agentId) : readAgents().find(item => item.id === rule.agentId); const agentState = agent?.relayStates?.find(item => item.id === rule.id);
   const status = rule.status !== 'running' ? 'stopped' : !agent ? 'error' : agentStatus(agent) === 'online' ? (agentState?.status || 'starting') : agentStatus(agent);
   return { ...rule, runtimeStatus: status, lastError: status === 'error' ? (agentState?.lastError || '远程 Agent 不存在或规则启动失败') : (agentState?.lastError || ''), bytesIn: Number(agentState?.bytesIn || 0), bytesOut: Number(agentState?.bytesOut || 0), connections: Number(agentState?.connections || 0), agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
-}function relaySnapshot(rule) {
-  if (rule.agentId) return remoteRelaySnapshot(rule);
+}function relaySnapshot(rule, context) {
+  if (rule.agentId) return remoteRelaySnapshot(rule, context);
   const runtime = relayRuntimes.get(rule.id); if (!runtime) return { ...rule, runtimeStatus: rule.runtimeStatus === 'legacy' ? 'legacy' : 'stopped' };
   return { ...rule, runtimeStatus: runtime.status, lastError: runtime.lastError || rule.lastError || '', bytesIn: runtime.bytesIn, bytesOut: runtime.bytesOut, connections: runtime.connections };
 }
-function inboundSnapshot(inbound) {
+function inboundSnapshot(inbound, context) {
   if (!inbound.agentId) {
     if (inbound.status !== 'running') return inbound;
     const tlsError = inboundTlsError(inbound); if (tlsError) return { ...inbound, status: 'error', desiredStatus: inbound.status, lastError: tlsError };
-    const info = runtimeInfo();
+    const info = context?.runtime || runtimeInfo();
     if (!info.available) return { ...inbound, status: 'error', desiredStatus: inbound.status, lastError: info.error || '未检测到 Xray Core' };
     if (!info.running) return { ...inbound, status: 'error', desiredStatus: inbound.status, lastError: info.lastError || 'Xray Core 尚未启动' };
     return { ...inbound, lastError: '' };
   }
   const tlsError = inboundTlsError(inbound); if (tlsError) return { ...inbound, status: 'error', desiredStatus: inbound.status, lastError: tlsError };
-  const agent = readAgents().find(item => item.id === inbound.agentId); const reported = agent?.inboundStates?.find(item => item.id === inbound.id); const state = inbound.status !== 'running' ? 'stopped' : !agent ? 'error' : agentStatus(agent) === 'online' ? (reported?.status || 'starting') : agentStatus(agent);
+  const agent = context?.agentsById ? context.agentsById.get(inbound.agentId) : readAgents().find(item => item.id === inbound.agentId); const reported = agent?.inboundStates?.find(item => item.id === inbound.id); const state = inbound.status !== 'running' ? 'stopped' : !agent ? 'error' : agentStatus(agent) === 'online' ? (reported?.status || 'starting') : agentStatus(agent);
   return { ...inbound, status: state, desiredStatus: inbound.status, lastError: state === 'error' ? (reported?.lastError || (agent?.xrayAvailable === false ? 'Agent 未检测到 Xray Core' : '远程节点启动失败')) : (reported?.lastError || ''), agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
 }function tcpReachable(host, port, timeout = 3500) {
   return new Promise(resolve => {
@@ -719,7 +798,10 @@ async function diagnoseRelay(relay) {
 }
 async function handleRelays(req, res, parts) {
   const relayId = Number(parts[2]);
-  if (parts.length === 2 && req.method === 'GET') return json(res, 200, readStore(relayFile, seedRelays, normalizeRelay).map(relaySnapshot));
+  if (parts.length === 2 && req.method === 'GET') {
+    const agentsById = new Map(readAgents().map(agent => [agent.id, agent]));
+    return json(res, 200, readStore(relayFile, seedRelays, normalizeRelay).map(rule => relaySnapshot(rule, { agentsById })));
+  }
   if (parts.length === 2 && req.method === 'POST') {
     const relay = createRelay(await body(req)); if (!relay) return json(res, 400, { error: '请填写规则名称、协议、监听端口与目标地址' }); const agents = readAgents();
     if (relay.agentId && !agents.some(agent => agent.id === relay.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const relays = readStore(relayFile, seedRelays, normalizeRelay); const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound);
@@ -756,7 +838,10 @@ async function handleRelays(req, res, parts) {
     const inbound = readStore(inboundFile, seedInbounds, normalizeInbound).find(item => item.id === inboundId); if (!inbound) return json(res, 404, { error: 'Not found' });
     const data = await body(req); const report = await diagnoseInbound(inbound, data.repair === true); return json(res, 200, report);
   }
-  if (parts.length === 2 && req.method === 'GET') return json(res, 200, readStore(inboundFile, seedInbounds, normalizeInbound).map(inboundSnapshot));
+  if (parts.length === 2 && req.method === 'GET') {
+    const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const agentsById = new Map(readAgents().map(agent => [agent.id, agent])); const requestRuntime = runtimeInfo();
+    return json(res, 200, inbounds.map(inbound => inboundSnapshot(inbound, { agentsById, runtime: requestRuntime })));
+  }
   if (parts.length === 3 && parts[2] === 'import-3xui' && req.method === 'POST') {
     let inbound; try { inbound = import3xuiInbound(await body(req)); } catch (error) { return json(res, 400, { error: error.message }); }
     const agents = readAgents(); if (inbound.agentId && !agents.some(agent => agent.id === inbound.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const tlsError = inboundTlsError(inbound); if (inbound.status === 'running' && tlsError) return json(res, 400, { error: tlsError });
@@ -802,11 +887,16 @@ async function handleRelays(req, res, parts) {
     const data = await body(req); const users = readStore(userFile, seedUsers); const user = users.find(item => item.id === userId); if (!user) return json(res, 404, { error: 'Not found' });
     const expire = data.expire === undefined ? user.expire : normalizeExpire(data.expire); if (expire === null) return json(res, 400, { error: '到期日期格式无效，请使用 YYYY-MM-DD' });
     if (data.status !== undefined && !statuses.has(data.status)) return json(res, 400, { error: '状态无效' });
-    if (data.status === 'running' && userExpired({ expire })) return json(res, 400, { error: '到期用户不能重新启用，请先设置未来的到期日期' });
-    user.expire = expire; if (data.limitGB !== undefined) { const limit = Number(data.limitGB); if (!Number.isFinite(limit) || limit <= 0) return json(res, 400, { error: '配额无效' }); user.limitGB = Math.round(limit * 1000) / 1000; }
-    const expired = userExpired(user); if (data.status !== undefined) user.status = data.status; if (expired) user.status = 'stopped';
+    let limitGB = Number(user.limitGB);
+    if (data.limitGB !== undefined) { const limit = Number(data.limitGB); if (!Number.isFinite(limit) || limit <= 0) return json(res, 400, { error: '配额无效' }); limitGB = Math.round(limit * 1000) / 1000; }
+    const expired = userExpired({ expire }); const quotaReached = Number.isFinite(limitGB) && Number(user.usedGB || 0) >= limitGB;
+    if (data.status === 'running' && expired) return json(res, 400, { error: '到期用户不能重新启用，请先设置未来的到期日期' });
+    if (data.status === 'running' && quotaReached) return json(res, 400, { error: '用户流量已达到配额，请先提高配额后再启用' });
+    const previousStatus = user.status; user.expire = expire; user.limitGB = limitGB;
+    if (data.status !== undefined) user.status = data.status;
+    if (expired || quotaReached) user.status = 'stopped';
     writeStore(userFile, users);
-    if (data.status !== undefined || expired) { const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); for (const access of user.access || []) setAccessActive(inbounds.find(item => item.id === access.inboundId), access, user.status === 'running'); writeStore(inboundFile, inbounds); const localEnabled = user.status === 'running' && (user.access || []).some(access => { const inbound = inbounds.find(item => item.id === access.inboundId); return inbound && !inbound.agentId && inbound.status === 'running'; }); if (localEnabled) await ensureLocalRuntime(); else await syncRuntimeIfRunning(); }
+    if (data.status !== undefined || expired || quotaReached || user.status !== previousStatus) { const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); for (const access of user.access || []) setAccessActive(inbounds.find(item => item.id === access.inboundId), access, user.status === 'running'); writeStore(inboundFile, inbounds); const localEnabled = user.status === 'running' && (user.access || []).some(access => { const inbound = inbounds.find(item => item.id === access.inboundId); return inbound && !inbound.agentId && inbound.status === 'running'; }); if (localEnabled) await ensureLocalRuntime(); else await syncRuntimeIfRunning(); }
     return json(res, 200, user);
   }
   if (req.method === 'DELETE') {
@@ -816,7 +906,10 @@ async function handleRelays(req, res, parts) {
     return json(res, 204);
   }
   return json(res, 405, { error: 'Method not allowed' });
-}function dateKey(value = new Date()) { return new Date(value).toISOString().slice(0, 10); }
+}function dateKey(value = new Date()) {
+  const date = new Date(value); if (!Number.isFinite(date.getTime())) return '';
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
 function trafficReport() {
   const users = readStore(userFile, seedUsers); const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound); const records = readStore(trafficFile, []);
   const days = Array.from({ length: 7 }, (_, index) => { const day = new Date(); day.setDate(day.getDate() - (6 - index)); return dateKey(day); });
@@ -842,9 +935,16 @@ async function handleTraffic(req, res, parts) {
   }
   return json(res, 405, { error: 'Method not allowed' });
 }function domainValid(domain) { return typeof domain === 'string' && /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i.test(domain.trim()); }
+function validateTlsFiles(certPath, keyPath) {
+  try {
+    if (!certPath || !keyPath || !fs.existsSync(certPath) || !fs.existsSync(keyPath)) return { error: '证书或私钥文件不存在或不可读' };
+    const cert = fs.readFileSync(certPath); const key = fs.readFileSync(keyPath); tls.createSecureContext({ cert, key });
+    return { cert, key };
+  } catch (error) { return { error: `证书或私钥无效/不匹配：${(error.message || String(error)).slice(0, 300)}` }; }
+}
 function tlsPublic(settings) {
-  const tls = settings.tls; const hasFiles = Boolean(tls.certPath && tls.keyPath && fs.existsSync(tls.certPath) && fs.existsSync(tls.keyPath));
-  return { ...tls, ready: hasFiles, restartRequired: hasFiles };
+  const tls = settings.tls; const configured = Boolean(tls.certPath && tls.keyPath); const validation = configured ? validateTlsFiles(tls.certPath, tls.keyPath) : { error: '' }; const ready = configured && !validation.error;
+  return { ...tls, ready, restartRequired: ready, error: validation.error || '' };
 }
 function certbotExists() { return spawnSync(process.platform === 'win32' ? 'where' : 'which', ['certbot'], { encoding: 'utf8' }).status === 0; }
 function certificateRequestError(result, domain) {
@@ -881,34 +981,59 @@ function startRuntime() {
   child.on('exit', (code, signal) => { if (runtime.child !== child) return; if (code && code !== 0) runtime.lastError = `Xray 已退出（code ${code}${signal ? `, ${signal}` : ''}）`; runtime.child = null; });
   return { info: runtimeInfo() };
 }
-function stopRuntime() { if (!runtime.child || runtime.child.exitCode !== null || runtime.child.killed) return false; runtime.child.kill(); return true; }
+function stopRuntime() {
+  const child = runtime.child; if (!child || child.exitCode !== null) return false;
+  if (child.killed) return true;
+  try { return child.kill(); } catch (error) { runtime.lastError = error.message || 'Xray Core 停止请求失败'; return false; }
+}
 function validateRuntimeConfig(config) {
   const probe = xrayProbe(); if (!probe.available) return { ok: true, skipped: true };
   const file = path.join(root, `.runtime-check-${id()}.json`);
-  try { fs.writeFileSync(file, JSON.stringify(config)); const result = spawnSync(probe.binary, ['run', '-test', '-c', file], { encoding: 'utf8', windowsHide: true, timeout: 15000 }); return result.status === 0 ? { ok: true } : { ok: false, error: (result.stderr || result.stdout || 'Xray 配置校验失败').slice(-900) }; }
+  try { fs.writeFileSync(file, JSON.stringify(config), { mode: 0o600 }); const result = spawnSync(probe.binary, ['run', '-test', '-c', file], { encoding: 'utf8', windowsHide: true, timeout: 15000 }); return result.status === 0 ? { ok: true } : { ok: false, error: (result.stderr || result.stdout || 'Xray 配置校验失败').slice(-900) }; }
   catch (error) { return { ok: false, error: error.message || 'Xray 配置校验失败' }; }
   finally { try { fs.unlinkSync(file); } catch {} }
 }
-function waitForExit(child) {
+function waitForExit(child, timeout = 3000) {
   if (!child || child.exitCode !== null) return Promise.resolve(true);
   return new Promise(resolve => {
-    let settled = false; const finish = exited => { if (settled) return; settled = true; clearTimeout(timer); child.removeListener('exit', onExit); resolve(exited); }; const onExit = () => finish(true); const timer = setTimeout(() => finish(false), 3000); child.once('exit', onExit);
+    let settled = false; const finish = exited => { if (settled) return; settled = true; clearTimeout(timer); child.removeListener('exit', onExit); child.removeListener('close', onExit); resolve(exited); }; const onExit = () => finish(true); const timer = setTimeout(() => finish(false), timeout); child.once('exit', onExit); child.once('close', onExit);
   });
 }
-async function ensureLocalRuntime() {
+function queueRuntimeOperation(operation) {
+  const next = runtimeOperationTail.then(operation, operation); runtimeOperationTail = next.catch(() => {}); return next;
+}
+async function stopRuntimeAndWait() {
+  const child = runtime.child; if (!child || child.exitCode !== null) return { stopped: false };
+  if (!stopRuntime()) {
+    if (child.exitCode !== null || runtime.child !== child || await waitForExit(child, 100)) return { stopped: true };
+    runtime.lastError = runtime.lastError || 'Xray Core 停止请求失败'; return { error: runtime.lastError };
+  }
+  let exited = await waitForExit(child);
+  if (!exited) {
+    try { child.kill('SIGKILL'); } catch {}
+    exited = await waitForExit(child, 1000);
+  }
+  if (!exited) { runtime.lastError = 'Xray Core 未能在强制停止后退出'; return { error: runtime.lastError }; }
+  return { stopped: true };
+}
+async function ensureLocalRuntimeNow() {
   const info = runtimeInfo(); if (!info.available) return { error: info.error || '未检测到 Xray Core' };
-  if (info.running) return syncRuntimeIfRunning();
+  if (info.running) return syncRuntimeIfRunningNow();
   const started = startRuntime(); if (started.error) return { error: started.error };
   await new Promise(resolve => setTimeout(resolve, 450)); const current = runtimeInfo();
   return current.running ? { started: true } : { error: current.lastError || 'Xray Core 启动失败，请查看系统日志' };
 }
-async function syncRuntimeIfRunning() {
-  const active = Boolean(runtime.child && runtime.child.exitCode === null && !runtime.child.killed); if (!active) return { reloaded: false };
-  const config = runtimeConfig(); const check = validateRuntimeConfig(config); if (!check.ok) { runtime.lastError = `新配置未应用：${check.error}`; return { error: runtime.lastError }; }
-  const previous = runtime.child; if (!stopRuntime()) { runtime.lastError = 'Xray Core 停止请求失败，新配置未应用'; return { error: runtime.lastError }; } const exited = await waitForExit(previous); if (!exited) { runtime.lastError = 'Xray Core 在 3 秒内未退出，新配置未应用'; return { error: runtime.lastError }; } const started = startRuntime(); if (started.error) { runtime.lastError = started.error; return { error: started.error }; }
+async function syncRuntimeIfRunningNow() {
+  const active = Boolean(runtime.child && runtime.child.exitCode === null); if (!active) return { reloaded: false };
+  const config = runtimeConfig(); const check = validateRuntimeConfig(config); if (!check.ok || check.skipped) { runtime.lastError = `新配置未应用：${check.error || 'Xray Core 不可用，无法校验配置'}`; return { error: runtime.lastError }; }
+  const stopped = await stopRuntimeAndWait(); if (stopped.error) { runtime.lastError = `${stopped.error}，新配置未应用`; return { error: runtime.lastError }; } const started = startRuntime(); if (started.error) { runtime.lastError = started.error; return { error: started.error }; }
   await new Promise(resolve => setTimeout(resolve, 350)); if (!runtime.child || runtime.child.exitCode !== null || runtime.child.killed) return { error: runtime.lastError || 'Xray 重载后未保持运行' };
   runtime.lastLog = `配置已自动重载\n${runtime.lastLog}`.slice(-1500); return { reloaded: true };
 }
+function ensureLocalRuntime() { return queueRuntimeOperation(ensureLocalRuntimeNow); }
+function syncRuntimeIfRunning() { return queueRuntimeOperation(syncRuntimeIfRunningNow); }
+function startLocalRuntime() { return queueRuntimeOperation(() => startRuntime()); }
+function stopLocalRuntime() { return queueRuntimeOperation(async () => { const result = await stopRuntimeAndWait(); return result.error ? result : { ...result, info: runtimeInfo() }; }); }
 function networkInfo() { return { ...networkState }; }
 function requestPublicIp(url) {
   return new Promise((resolve, reject) => {
@@ -930,16 +1055,38 @@ async function detectPublicAddress(force = false) {
     try { const response = await requestPublicIp(source.url); const address = (source.json ? JSON.parse(response).ip : response).trim(); if (net.isIP(address)) { Object.assign(networkState, { publicAddress: address, source: source.name, checkedAt: new Date().toISOString(), error: '', checking: false }); return networkInfo(); } } catch (error) { networkState.error = error.message || '公网地址检测失败'; }
   }
   networkState.checkedAt = new Date().toISOString(); networkState.checking = false; return networkInfo();
-}function requestBuffer(url, redirects = 0) {
+}function requestBuffer(url, redirects = 0, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     if (redirects > 5) return reject(new Error('下载重定向次数过多'));
-    https.get(url, { headers: { 'User-Agent': '3xUI-Lite-Core-Installer', Accept: 'application/vnd.github+json' } }, response => {
-      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) return resolve(requestBuffer(new URL(response.headers.location, url).toString(), redirects + 1));
-      if (response.statusCode !== 200) return reject(new Error(`下载失败（HTTP ${response.statusCode}）`));
+    let settled = false; let headerTimer; let request;
+    const finish = (error, value) => {
+      if (settled) return; settled = true; clearTimeout(headerTimer);
+      if (error) reject(error); else resolve(value);
+    };
+    request = https.get(url, { headers: { 'User-Agent': '3xUI-Lite-Core-Installer', Accept: 'application/vnd.github+json' } }, response => {
+      clearTimeout(headerTimer);
+      response.setTimeout(timeoutMs, () => {
+        const error = new Error('下载响应超时'); response.destroy(error); request.destroy(error); finish(error);
+      });
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        response.resume(); return finish(null, requestBuffer(new URL(response.headers.location, url).toString(), redirects + 1, timeoutMs));
+      }
+      if (response.statusCode !== 200) { response.resume(); return finish(new Error(`下载失败（HTTP ${response.statusCode}）`)); }
       const chunks = []; let size = 0;
-      response.on('data', chunk => { size += chunk.length; if (size > 120 * 1024 * 1024) response.destroy(new Error('下载文件过大')); else chunks.push(chunk); });
-      response.on('end', () => resolve(Buffer.concat(chunks))); response.on('error', reject);
-    }).on('error', reject);
+      response.on('data', chunk => {
+        size += chunk.length;
+        if (size > 120 * 1024 * 1024) {
+          const error = new Error('下载文件过大'); response.destroy(error); request.destroy(error); finish(error);
+        } else chunks.push(chunk);
+      });
+      response.on('end', () => finish(null, Buffer.concat(chunks)));
+      response.on('aborted', () => finish(new Error('下载响应被中断')));
+      response.on('error', error => finish(error));
+    });
+    headerTimer = setTimeout(() => {
+      const error = new Error('下载连接超时'); request.destroy(error); finish(error);
+    }, timeoutMs);
+    request.on('error', error => finish(error));
   });
 }
 function xrayReleaseAsset() {
@@ -949,9 +1096,47 @@ function xrayReleaseAsset() {
   if (process.platform === 'linux' && process.arch === 'arm') return { archive: 'Xray-linux-arm32-v7a.zip', binary: 'xray' };
   return null;
 }
-async function installXray() {
+function publishRuntimeFiles(sourceDir, targetDir, binaryName) {
+  fs.mkdirSync(targetDir, { recursive: true });
+  const releaseId = `${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+  const entries = [binaryName, 'geoip.dat', 'geosite.dat'].map(name => {
+    const source = path.join(sourceDir, name);
+    if (!fs.existsSync(source) || !fs.statSync(source).isFile()) throw new Error(`安装包中未找到 ${name}`);
+    const extension = path.extname(name); const stem = extension ? name.slice(0, -extension.length) : name;
+    return { name, source, destination: path.join(targetDir, name), next: path.join(targetDir, `.${stem}.${releaseId}.next${extension}`), backup: path.join(targetDir, `.${stem}.${releaseId}.previous${extension}`), backedUp: false, published: false };
+  });
+  try {
+    for (const entry of entries) {
+      fs.copyFileSync(entry.source, entry.next);
+      if (entry.name === binaryName && process.platform !== 'win32') fs.chmodSync(entry.next, 0o755);
+    }
+    const stagedBinary = entries.find(entry => entry.name === binaryName).next;
+    const verify = spawnSync(stagedBinary, ['version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 });
+    if (verify.error || verify.status !== 0) throw new Error(`${binaryName} 发布前校验失败`);
+    for (const entry of entries) {
+      if (fs.existsSync(entry.destination)) { fs.renameSync(entry.destination, entry.backup); entry.backedUp = true; }
+      fs.renameSync(entry.next, entry.destination); entry.published = true;
+    }
+  } catch (error) {
+    let rollbackError = '';
+    for (const entry of [...entries].reverse()) {
+      try {
+        if (entry.published && fs.existsSync(entry.destination)) fs.unlinkSync(entry.destination);
+        if (entry.backedUp && fs.existsSync(entry.backup)) fs.renameSync(entry.backup, entry.destination);
+      } catch (rollback) { rollbackError ||= rollback.message || String(rollback); }
+    }
+    for (const entry of entries) try { if (fs.existsSync(entry.next)) fs.unlinkSync(entry.next); } catch {}
+    if (rollbackError) throw new Error(`${error.message || error}；回滚失败：${rollbackError}`);
+    throw error;
+  }
+  for (const entry of entries) {
+    try { if (fs.existsSync(entry.backup)) fs.unlinkSync(entry.backup); } catch {}
+    try { if (fs.existsSync(entry.next)) fs.unlinkSync(entry.next); } catch {}
+  }
+}
+async function installXrayNow() {
   if (runtime.installing) return { error: 'Xray Core 正在安装中' };
-  if (runtime.child && runtime.child.exitCode === null && !runtime.child.killed) return { error: '请先停止正在运行的 Xray Core' };
+  if (runtime.child && runtime.child.exitCode === null) return { error: '请先等待 Xray Core 完全停止' };
   const rawVersion = cleanText(arguments[0], '', 80); const requestedVersion = rawVersion && !rawVersion.startsWith('v') ? `v${rawVersion}` : rawVersion;
   if (requestedVersion && !/^v[0-9]+(?:\.[0-9]+){1,3}(?:[-._a-zA-Z0-9]+)?$/.test(requestedVersion)) return { error: '版本格式无效，请使用官方标签，例如 v26.3.27' };
   const targetAsset = xrayReleaseAsset(); if (!targetAsset) return { error: `当前系统不支持内置安装：${process.platform} ${process.arch}` };
@@ -973,17 +1158,25 @@ async function installXray() {
     const source = path.join(out, targetAsset.binary); if (!fs.existsSync(source)) throw new Error(`安装包中未找到 ${targetAsset.binary}`);
     if (process.platform !== 'win32') fs.chmodSync(source, 0o755);
     const verify = spawnSync(source, ['version'], { encoding: 'utf8', windowsHide: true, timeout: 5000 }); if (verify.status !== 0) throw new Error(`${targetAsset.binary} 校验失败`);
-    const target = path.join(root, 'runtime'); fs.mkdirSync(target, { recursive: true });
-    for (const name of [targetAsset.binary, 'geoip.dat', 'geosite.dat']) { const from = path.join(out, name); if (fs.existsSync(from)) { const destination = path.join(target, name); fs.copyFileSync(from, destination); if (name === targetAsset.binary && process.platform !== 'win32') fs.chmodSync(destination, 0o755); } }
+    const target = path.join(root, 'runtime'); publishRuntimeFiles(out, target, targetAsset.binary);
     runtime.lastLog = `已安装 Xray Core ${release.tag_name || ''}`; return { info: runtimeInfo(), version: release.tag_name || '' };
   } catch (error) { runtime.lastError = error.message || 'Xray Core 安装失败'; return { error: runtime.lastError }; }
   finally { runtime.installing = false; fs.rmSync(temp, { recursive: true, force: true }); }
-}async function handleRuntime(req, res, parts) {
+}
+function installLocalRuntime(version) {
+  if (runtime.installing || runtimeInstallQueued) return Promise.resolve({ error: 'Xray Core 正在安装中' });
+  runtimeInstallQueued = true;
+  return queueRuntimeOperation(async () => {
+    if (runtime.child && runtime.child.exitCode === null) return { error: '请先停止正在运行的 Xray Core' };
+    return installXrayNow(version);
+  }).finally(() => { runtimeInstallQueued = false; });
+}
+async function handleRuntime(req, res, parts) {
   if (parts.length === 2 && req.method === 'GET') return json(res, 200, runtimeInfo());
   if (parts.length === 3 && parts[2] === 'config' && req.method === 'GET') return json(res, 200, runtimeConfig());
-  if (parts.length === 3 && parts[2] === 'install' && req.method === 'POST') { const data = await body(req); const result = await installXray(data.version); return result.error ? json(res, 422, { error: result.error, runtime: runtimeInfo() }) : json(res, 201, result); }
-  if (parts.length === 3 && parts[2] === 'start' && req.method === 'POST') { const result = startRuntime(); return result.error ? json(res, 409, { error: result.error, runtime: runtimeInfo() }) : json(res, 200, result.info); }
-  if (parts.length === 3 && parts[2] === 'stop' && req.method === 'POST') { stopRuntime(); return json(res, 200, runtimeInfo()); }
+  if (parts.length === 3 && parts[2] === 'install' && req.method === 'POST') { const data = await body(req); const result = await installLocalRuntime(data.version); return result.error ? json(res, 422, { error: result.error, runtime: runtimeInfo() }) : json(res, 201, result); }
+  if (parts.length === 3 && parts[2] === 'start' && req.method === 'POST') { const result = await startLocalRuntime(); return result.error ? json(res, 409, { error: result.error, runtime: runtimeInfo() }) : json(res, 200, result.info); }
+  if (parts.length === 3 && parts[2] === 'stop' && req.method === 'POST') { const result = await stopLocalRuntime(); return result.error ? json(res, 409, { error: result.error, runtime: runtimeInfo() }) : json(res, 200, result.info); }
   return json(res, 405, { error: 'Method not allowed' });
 }async function handleSystem(req, res, pathname) {
   if (pathname === '/api/system' && req.method === 'GET') { const settings = readSettings(); return json(res, 200, { panelVersion: PANEL_VERSION, admin: { username: settings.admin.username, mustChangePassword: settings.admin.mustChangePassword }, tls: tlsPublic(settings), certbotAvailable: certbotExists(), runtime: runtimeInfo(), network: networkInfo(), security: { transportSecure: requestIsSecure(req), secureCookie: process.env.SECURE_COOKIE === 'true' || requestIsSecure(req), trustProxy: process.env.TRUST_PROXY === 'true', defaultPassword: settings.admin.defaultPassword === true, mustChangePassword: settings.admin.mustChangePassword === true, auditEntries: readAudit(1000).length } }); }
@@ -1002,6 +1195,7 @@ async function installXray() {
     const data = await body(req); const settings = readSettings(); const domain = cleanText(data.domain, '', 253).toLowerCase(); const email = cleanText(data.email, '', 100); const certPath = cleanText(data.certPath, '', 512); const keyPath = cleanText(data.keyPath, '', 512);
     if (!domainValid(domain) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return json(res, 400, { error: '请填写有效域名和通知邮箱' });
     if (Boolean(certPath) !== Boolean(keyPath)) return json(res, 400, { error: '证书和私钥路径必须同时填写' });
+    if (certPath) { const validation = validateTlsFiles(certPath, keyPath); if (validation.error) return json(res, 400, { error: validation.error }); }
     settings.tls = { domain, email, certPath, keyPath, updatedAt: new Date().toISOString() }; writeSettings(settings);
     return json(res, 200, { tls: tlsPublic(settings) });
   }
@@ -1028,19 +1222,19 @@ async function requestHandler(req, res) {
     if (parts[0] === 'api' && parts[1] !== 'agent' && !requestOriginAllowed(req)) return json(res, 403, { error: '请求来源校验失败', code: 'ORIGIN_REJECTED' });
     if (url.pathname.startsWith('/api/auth/')) { const handled = await handleAuth(req, res, url.pathname); if (handled !== false) return; return json(res, 404, { error: 'Not found' }); }
     if (url.pathname === '/api/health' && req.method === 'GET') return json(res, 200, { ok: true, version: PANEL_VERSION });
-    if (parts[0] === 'api' && parts[1] === 'agent') { await reconcileExpiredUsers(); return handleAgentGateway(req, res, parts); }
+    if (parts[0] === 'api' && parts[1] === 'agent') return await handleAgentGateway(req, res, parts);
     if (parts[0] === 'api') {
       const session = requireAuth(req, res); if (!session) return;
       if (['POST', 'PATCH', 'PUT', 'DELETE'].includes(req.method)) auditOnFinish(req, res, session, 'admin.request', url.pathname);
-      const settings = readSettings(); if (settings.admin.mustChangePassword && url.pathname !== '/api/system/password') return json(res, 403, { error: '首次使用必须先修改默认管理员密码', code: 'PASSWORD_CHANGE_REQUIRED' });
+      const settings = readSettings(); if (settings.admin.mustChangePassword && url.pathname !== '/api/system/password') return json(res, 403, { error: '首次使用必须先修改一次性初始密码', code: 'PASSWORD_CHANGE_REQUIRED' });
       await reconcileExpiredUsers();
-      if (parts[1] === 'relays') return handleRelays(req, res, parts);
-      if (parts[1] === 'agents') return handleAgents(req, res, parts);
-      if (parts[1] === 'inbounds') return handleInbounds(req, res, parts);
-      if (parts[1] === 'users') return handleUsers(req, res, parts);
-      if (parts[1] === 'traffic') return handleTraffic(req, res, parts);
-      if (parts[1] === 'runtime') return handleRuntime(req, res, parts);
-      if (parts[1] === 'system') return handleSystem(req, res, url.pathname);
+      if (parts[1] === 'relays') return await handleRelays(req, res, parts);
+      if (parts[1] === 'agents') return await handleAgents(req, res, parts);
+      if (parts[1] === 'inbounds') return await handleInbounds(req, res, parts);
+      if (parts[1] === 'users') return await handleUsers(req, res, parts);
+      if (parts[1] === 'traffic') return await handleTraffic(req, res, parts);
+      if (parts[1] === 'runtime') return await handleRuntime(req, res, parts);
+      if (parts[1] === 'system') return await handleSystem(req, res, url.pathname);
       return json(res, 404, { error: 'Not found' });
     }
     if (req.method !== 'GET') return json(res, 405, { error: 'Method not allowed' });
@@ -1048,7 +1242,12 @@ async function requestHandler(req, res) {
     if (!file.startsWith(root + path.sep) || !publicFiles.has(requested) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return json(res, 404, { error: 'Not found' });
     const stream = fs.createReadStream(file); stream.on('error', error => { console.error(`Static file read failed: ${error.message || error}`); res.destroy(error); });
     res.writeHead(200, { ...securityHeaders, 'Content-Type': types[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); stream.pipe(res);
-  } catch (error) { const statusCode = error?.code === 'ERR_INVALID_URL' ? 400 : Number.isInteger(error?.statusCode) ? error.statusCode : 500; if (statusCode >= 500) console.error(`Request failed: ${error.message || error}`); json(res, statusCode, { error: statusCode >= 500 ? '服务器处理请求失败，请查看服务日志' : (error.message || '请求无效') }); }
+  } catch (error) {
+    if (res.headersSent) { res.destroy(error); return; }
+    const statusCode = error?.code === 'ERR_INVALID_URL' || error instanceof SyntaxError ? 400 : Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+    if (statusCode >= 500) console.error(`Request failed: ${error.message || error}`);
+    json(res, statusCode, { error: statusCode >= 500 ? '服务器处理请求失败，请查看服务日志' : (error.message || '请求无效') });
+  }
 }
 const server = http.createServer(requestHandler);
 if (require.main === module) {
@@ -1061,10 +1260,16 @@ if (require.main === module) {
     setInterval(() => reconcileExpiredUsers().catch(error => console.error(`User expiration reconciliation failed: ${error.message}`)), 60 * 1000).unref();
     setInterval(() => { const now = Date.now(); for (const [value, session] of sessions) if (session.expiresAt <= now) sessions.delete(value); }, 15 * 60 * 1000).unref();
   });
-  const bootTls = readSettings().tls;
-  if (bootTls.certPath && bootTls.keyPath && fs.existsSync(bootTls.certPath) && fs.existsSync(bootTls.keyPath)) {
+  const bootTls = readSettings().tls; announceInitialAdminPassword();
+  if (bootTls.certPath && bootTls.keyPath) {
     const httpsPort = Number(process.env.HTTPS_PORT || 3443);
-    https.createServer({ cert: fs.readFileSync(bootTls.certPath), key: fs.readFileSync(bootTls.keyPath) }, requestHandler).listen(httpsPort, panelHost, () => console.log(`3xUI Lite HTTPS: https://${panelHost}:${httpsPort}`));
+    try {
+      const credentials = validateTlsFiles(bootTls.certPath, bootTls.keyPath);
+      if (credentials.error) throw new Error(credentials.error);
+      const tlsServer = https.createServer({ cert: credentials.cert, key: credentials.key }, requestHandler);
+      tlsServer.on('error', error => console.error(`3xUI Lite HTTPS 启动失败，HTTP 面板仍可用于修复：${error.message || error}`));
+      tlsServer.listen(httpsPort, panelHost, () => console.log(`3xUI Lite HTTPS: https://${panelHost}:${httpsPort}`));
+    } catch (error) { console.error(`3xUI Lite HTTPS 配置无效，HTTP 面板仍可用于修复：${error.message || error}`); }
   }
 }
 module.exports = { server, buildNode, import3xuiInbound, createUser, normalizeExpire, userExpired, inboundTlsError, agentInstallScript, readSettings, certificateRequestError };
