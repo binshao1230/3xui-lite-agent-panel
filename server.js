@@ -20,7 +20,7 @@ const runtimeFile = path.join(root, 'runtime-xray.json');
 const settingFile = path.join(root, 'settings.json');
 const auditFile = path.join(root, 'audit.json');
 const port = Number(process.env.PORT || 3000);
-const PANEL_VERSION = '0.7.2';
+const PANEL_VERSION = '0.8.0';
 const sessions = new Map();
 const loginAttempts = new Map();
 let generatedInitialAdminPassword = '';
@@ -487,17 +487,19 @@ function agentHeartbeatTransportSecure(req, agent) {
 }
 function normalizeAgentInboundStates(items) {
   if (!Array.isArray(items)) return [];
-  return items.slice(0, 200).map(item => ({ id: Number(item?.id), status: ['running', 'starting', 'stopped', 'error'].includes(item?.status) ? item.status : 'stopped', lastError: cleanText(item?.lastError, '', 500), updatedAt: cleanText(item?.updatedAt, '', 64) })).filter(item => Number.isInteger(item.id));
+  return items.slice(0, 1000).map(item => ({ id: Number(item?.id), revision: cleanText(item?.revision, '', 128), status: ['running', 'starting', 'stopped', 'error'].includes(item?.status) ? item.status : 'stopped', lastError: cleanText(item?.lastError, '', 500), updatedAt: cleanText(item?.updatedAt, '', 64) })).filter(item => Number.isInteger(item.id));
 }function normalizeAgentRelayStates(items) {
   if (!Array.isArray(items)) return [];
-  return items.slice(0, 200).map(item => ({ id: Number(item?.id), status: ['running', 'starting', 'stopped', 'error'].includes(item?.status) ? item.status : 'stopped', lastError: cleanText(item?.lastError, '', 500), bytesIn: Math.max(0, Number(item?.bytesIn || 0)), bytesOut: Math.max(0, Number(item?.bytesOut || 0)), connections: Math.max(0, Number(item?.connections || 0)), updatedAt: cleanText(item?.updatedAt, '', 64) })).filter(item => Number.isInteger(item.id));
+  return items.slice(0, 1000).map(item => ({ id: Number(item?.id), revision: cleanText(item?.revision, '', 128), status: ['running', 'starting', 'stopped', 'error'].includes(item?.status) ? item.status : 'stopped', lastError: cleanText(item?.lastError, '', 500), bytesIn: Math.max(0, Number(item?.bytesIn || 0)), bytesOut: Math.max(0, Number(item?.bytesOut || 0)), connections: Math.max(0, Number(item?.connections || 0)), updatedAt: cleanText(item?.updatedAt, '', 64) })).filter(item => Number.isInteger(item.id));
 }
 function normalizeAgent(item) {
   if (!item || typeof item !== 'object' || !validText(item.id, 80) || !validText(item.token, 160)) return null;
-  return { id: item.id, token: item.token, name: cleanText(item.name, 'Unnamed Agent', 80), controllerUrl: controllerUrl(item.controllerUrl, true), enabled: item.enabled !== false, version: cleanText(item.version, '', 60), hostname: cleanText(item.hostname, '', 120), platform: cleanText(item.platform, '', 80), arch: cleanText(item.arch, '', 40), nodeVersion: cleanText(item.nodeVersion, '', 40), uptimeSeconds: Math.max(0, Number(item.uptimeSeconds || 0)), memoryTotal: Math.max(0, Number(item.memoryTotal || 0)), memoryFree: Math.max(0, Number(item.memoryFree || 0)), cpus: Math.max(0, Number(item.cpus || 0)), addresses: Array.isArray(item.addresses) ? item.addresses.filter(value => validText(value, 80)).slice(0, 20) : [], processId: Math.max(0, Number(item.processId || 0)), agentStartedAt: cleanText(item.agentStartedAt, '', 64), updateRequestId: cleanText(item.updateRequestId, '', 64), updateRequestedAt: cleanText(item.updateRequestedAt, '', 64), updateError: cleanText(item.updateError, '', 500), lastUpdatedAt: cleanText(item.lastUpdatedAt, '', 64), xrayAvailable: item.xrayAvailable === true, xrayVersion: cleanText(item.xrayVersion, '', 100), xrayInstallRequestId: cleanText(item.xrayInstallRequestId, '', 64), xrayInstallRequestedAt: cleanText(item.xrayInstallRequestedAt, '', 64), xrayInstalling: item.xrayInstalling === true, xrayInstallError: cleanText(item.xrayInstallError, '', 500), xrayInstalledAt: cleanText(item.xrayInstalledAt, '', 64), inboundStates: normalizeAgentInboundStates(item.inboundStates), lastSeenAt: cleanText(item.lastSeenAt, '', 64), createdAt: cleanText(item.createdAt, new Date().toISOString(), 64), updatedAt: cleanText(item.updatedAt, '', 64), lastHeartbeatSecure: item.lastHeartbeatSecure === false ? false : item.lastHeartbeatSecure === true ? true : null, relayStates: normalizeAgentRelayStates(item.relayStates) };
+  return { id: item.id, token: item.token, name: cleanText(item.name, 'Unnamed Agent', 80), controllerUrl: controllerUrl(item.controllerUrl, true), enabled: item.enabled !== false, version: cleanText(item.version, '', 60), hostname: cleanText(item.hostname, '', 120), platform: cleanText(item.platform, '', 80), arch: cleanText(item.arch, '', 40), nodeVersion: cleanText(item.nodeVersion, '', 40), uptimeSeconds: Math.max(0, Number(item.uptimeSeconds || 0)), memoryTotal: Math.max(0, Number(item.memoryTotal || 0)), memoryFree: Math.max(0, Number(item.memoryFree || 0)), cpus: Math.max(0, Number(item.cpus || 0)), addresses: Array.isArray(item.addresses) ? item.addresses.filter(value => validText(value, 80)).slice(0, 20) : [], processId: Math.max(0, Number(item.processId || 0)), agentStartedAt: cleanText(item.agentStartedAt, '', 64), updateRequestId: cleanText(item.updateRequestId, '', 64), updateRequestedAt: cleanText(item.updateRequestedAt, '', 64), updateError: cleanText(item.updateError, '', 500), lastUpdatedAt: cleanText(item.lastUpdatedAt, '', 64), xrayAvailable: item.xrayAvailable === true, xrayVersion: cleanText(item.xrayVersion, '', 100), xrayInstallRequestId: cleanText(item.xrayInstallRequestId, '', 64), xrayInstallRequestedAt: cleanText(item.xrayInstallRequestedAt, '', 64), xrayInstalling: item.xrayInstalling === true, xrayInstallError: cleanText(item.xrayInstallError, '', 500), xrayInstalledAt: cleanText(item.xrayInstalledAt, '', 64), inboundStates: normalizeAgentInboundStates(item.inboundStates), lastSeenAt: cleanText(item.lastSeenAt, '', 64), disableRequestedAt: cleanText(item.disableRequestedAt, '', 64), disabledAckAt: cleanText(item.disabledAckAt, '', 64), lastDisabledSeenAt: cleanText(item.lastDisabledSeenAt, '', 64), maintenanceCancelledAt: cleanText(item.maintenanceCancelledAt, '', 64), maintenanceCancelledReason: cleanText(item.maintenanceCancelledReason, '', 240), createdAt: cleanText(item.createdAt, new Date().toISOString(), 64), updatedAt: cleanText(item.updatedAt, '', 64), lastHeartbeatSecure: item.lastHeartbeatSecure === false ? false : item.lastHeartbeatSecure === true ? true : null, relayStates: normalizeAgentRelayStates(item.relayStates) };
 }function readAgents() { return readStore(agentFile, [], normalizeAgent).filter(Boolean); }
 function agentStatus(agent) { if (!agent.enabled) return 'disabled'; const seen = Date.parse(agent.lastSeenAt || ''); return Number.isFinite(seen) && Date.now() - seen < 90 * 1000 ? 'online' : 'offline'; }
-function agentPublic(agent) { const { token: hidden, updateRequestId: hiddenUpdate, xrayInstallRequestId: hiddenXrayInstall, ...safe } = agent; return { ...safe, controllerSecure: controllerUrlSecure(agent.controllerUrl) && agent.lastHeartbeatSecure !== false, status: agentStatus(agent), updatePending: Boolean(agent.updateRequestId), xrayInstallPending: Boolean(agent.xrayInstallRequestId) }; }
+function agentDisablePending(agent) { return Boolean(agent && !agent.enabled && !agent.disabledAckAt); }
+function agentWorkloadsStopConfirmed(agent) { return Boolean(agent && !agent.enabled && agent.disabledAckAt); }
+function agentPublic(agent) { const { token: hidden, updateRequestId: hiddenUpdate, xrayInstallRequestId: hiddenXrayInstall, ...safe } = agent; return { ...safe, controllerSecure: controllerUrlSecure(agent.controllerUrl) && agent.lastHeartbeatSecure !== false, status: agentStatus(agent), updatePending: Boolean(agent.updateRequestId), xrayInstallPending: Boolean(agent.xrayInstallRequestId), safeStopAckCapable: agentSupportsWorkloadStopAck(agent) }; }
 function secureTokenMatch(expected, actual) { if (typeof actual !== 'string' || expected.length !== actual.length) return false; return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(actual)); }
 function agentServiceName(agent) { return `3xui-lite-agent-${agent.id}`; }
 function agentInstallScript(agent) {
@@ -562,7 +564,8 @@ WantedBy=multi-user.target
 UNIT
 chmod 600 "$service_file"
 systemctl daemon-reload
-systemctl enable --now ${serviceName}
+systemctl enable ${serviceName}
+systemctl restart ${serviceName}
 systemctl --no-pager --full status ${serviceName}`;
 }
 function agentCommand(agent) { return `echo ${Buffer.from(agentInstallScript(agent)).toString('base64')} | base64 -d | sudo bash`; }
@@ -571,16 +574,116 @@ function createAgent(data) {
   if (!name || !target) return null;
   const now = new Date().toISOString(); return { id: `agent-${token(9)}`, token: token(32), name, controllerUrl: target, enabled: true, version: '', hostname: '', platform: '', arch: '', nodeVersion: '', lastSeenAt: '', createdAt: now, updatedAt: now };
 }
+function inboundRevision(inbound) {
+  const payload = { id: Number(inbound.id), name: cleanText(inbound.name, '', 200), port: Number(inbound.port), xray: inbound.xray };
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
 function agentInboundTasks(agentId) {
-  return readStore(inboundFile, seedInbounds, normalizeInbound).filter(inbound => inbound.agentId === agentId && inbound.status === 'running' && !inboundTlsError(inbound)).map(inbound => ({ id: inbound.id, name: inbound.name, port: inbound.port, xray: inbound.xray }));
-}function agentRelayTasks(agentId) {
-  return readStore(relayFile, seedRelays, normalizeRelay).filter(rule => rule.agentId === agentId && rule.status === 'running').map(rule => ({ id: rule.id, name: rule.name, transport: rule.transport, listenPort: rule.listenPort, bindAddress: rule.bindAddress, targetHost: rule.targetHost, targetPort: rule.targetPort }));
+  return readStore(inboundFile, seedInbounds, normalizeInbound)
+    .filter(inbound => inbound.agentId === agentId && inbound.status === 'running' && !inboundTlsError(inbound))
+    .map(inbound => ({ id: inbound.id, revision: inboundRevision(inbound), name: inbound.name, port: inbound.port, xray: inbound.xray }));
+}
+function relayRevision(rule) {
+  const payload = { id: Number(rule.id), name: cleanText(rule.name, '', 200), transport: rule.transport, listenPort: Number(rule.listenPort), bindAddress: rule.bindAddress, targetHost: rule.targetHost, targetPort: Number(rule.targetPort) };
+  return crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+function agentRelayTasks(agentId) {
+  return readStore(relayFile, seedRelays, normalizeRelay)
+    .filter(rule => rule.agentId === agentId && (rule.status === 'running' || rule.pendingRemoteAction))
+    .map(rule => rule.pendingRemoteAction
+      ? { id: rule.id, revision: rule.pendingRemoteRevision, tombstone: true, action: rule.pendingRemoteAction }
+      : { id: rule.id, revision: relayRevision(rule), name: rule.name, transport: rule.transport, listenPort: rule.listenPort, bindAddress: rule.bindAddress, targetHost: rule.targetHost, targetPort: rule.targetPort });
+}
+function requestRemoteRelayControl(rule, action) {
+  if (rule.pendingRemoteAction === action && rule.pendingRemoteRevision) return rule;
+  const now = new Date().toISOString();
+  rule.status = 'stopped';
+  rule.runtimeStatus = 'stopping';
+  rule.lastError = '';
+  rule.pendingRemoteAction = action;
+  rule.pendingRemoteRevision = token(18);
+  rule.pendingRemoteRequestedAt = now;
+  rule.pendingRemoteDeliveredAt = '';
+  rule.updatedAt = now;
+  return rule;
+}
+function clearRemoteRelayControl(rule) {
+  rule.pendingRemoteAction = '';
+  rule.pendingRemoteRevision = '';
+  rule.pendingRemoteRequestedAt = '';
+  rule.pendingRemoteDeliveredAt = '';
+  return rule;
+}
+function reconcileAgentRelayControls(agent, states) {
+  const reportedById = new Map((Array.isArray(states) ? states : []).map(state => [Number(state.id), state]));
+  const relays = readStore(relayFile, seedRelays, normalizeRelay);
+  let changed = false;
+  for (let index = relays.length - 1; index >= 0; index--) {
+    const rule = relays[index];
+    if (rule.agentId !== agent.id || !rule.pendingRemoteAction || !rule.pendingRemoteRevision) continue;
+    const reported = reportedById.get(Number(rule.id));
+    const explicitAck = agentSupportsWorkloadStopAck(agent) && reported?.revision === rule.pendingRemoteRevision && reported?.status === 'stopped';
+    if (!explicitAck) continue;
+    if (rule.pendingRemoteAction === 'delete') relays.splice(index, 1);
+    else {
+      clearRemoteRelayControl(rule);
+      rule.runtimeStatus = 'stopped';
+      rule.lastError = '';
+      rule.updatedAt = new Date().toISOString();
+    }
+    changed = true;
+  }
+  if (changed) writeStore(relayFile, relays);
+  return changed;
+}
+function settleAgentRelayControlsAfterDisableAck(agentId) {
+  const relays = readStore(relayFile, seedRelays, normalizeRelay); let changed = false;
+  for (let index = relays.length - 1; index >= 0; index--) {
+    const rule = relays[index]; if (rule.agentId !== agentId || !rule.pendingRemoteAction) continue;
+    if (rule.pendingRemoteAction === 'delete') relays.splice(index, 1);
+    else { clearRemoteRelayControl(rule); rule.status = 'stopped'; rule.runtimeStatus = 'stopped'; rule.lastError = ''; rule.updatedAt = new Date().toISOString(); }
+    changed = true;
+  }
+  if (changed) writeStore(relayFile, relays);
+  return changed;
+}
+function markAgentRelayControlsDelivered(agentId) {
+  const relays = readStore(relayFile, seedRelays, normalizeRelay);
+  const now = new Date().toISOString();
+  let changed = false;
+  for (const rule of relays) {
+    if (rule.agentId !== agentId || !rule.pendingRemoteAction || rule.pendingRemoteDeliveredAt) continue;
+    rule.pendingRemoteDeliveredAt = now;
+    rule.updatedAt = now;
+    changed = true;
+  }
+  if (changed) writeStore(relayFile, relays);
+  return changed;
+}
+function recordDisabledAgentHeartbeat(agent, agents, info) {
+  const now = new Date().toISOString();
+  agent.version = cleanText(info?.version, agent.version, 60); agent.agentStartedAt = cleanText(info?.agentStartedAt, agent.agentStartedAt, 64); agent.processId = Math.max(0, Number(info?.processId || 0)); agent.xrayAvailable = info?.xrayAvailable === true; agent.xrayVersion = cleanText(info?.xrayVersion, agent.xrayVersion, 100); agent.xrayInstalling = info?.xrayInstalling === true;
+  const inboundStates = normalizeAgentInboundStates(info?.inboundStates);
+  const relayStates = normalizeAgentRelayStates(info?.relayStates);
+  reconcileAgentRelayControls(agent, relayStates);
+  agent.inboundStates = inboundStates;
+  agent.relayStates = relayStates;
+  agent.lastDisabledSeenAt = now;
+  const workloadActive = inboundStates.some(state => state.status !== 'stopped') || relayStates.some(state => state.status !== 'stopped') || info?.xrayInstalling === true;
+  if (!workloadActive && agentSupportsWorkloadStopAck(agent) && !agent.disabledAckAt) { agent.disabledAckAt = now; settleAgentRelayControlsAfterDisableAck(agent.id); }
+  agent.updatedAt = now;
+  writeStore(agentFile, agents);
+  markAgentRelayControlsDelivered(agent.id);
 }
 async function handleAgentGateway(req, res, parts) {
   if (parts.length !== 3 || parts[2] !== 'heartbeat' || req.method !== 'POST') return json(res, 404, { error: 'Not found' });
   const data = await body(req); const agentId = cleanText(data.id, '', 80); const supplied = cleanText(data.token, '', 160); let agents = readAgents(); let agent = agents.find(item => item.id === agentId);
   if (!agent || !secureTokenMatch(agent.token, supplied)) return json(res, 401, { error: 'Agent 身份验证失败' });
-  if (!agent.enabled) return json(res, 403, { error: '该 Agent 已被面板停用' });
+  const info = data.info && typeof data.info === 'object' ? data.info : data;
+  if (!agent.enabled) {
+    recordDisabledAgentHeartbeat(agent, agents, info);
+    return json(res, 403, { error: '该 Agent 已被面板停用' });
+  }
   if (!controllerUrlSecure(agent.controllerUrl) || !agentHeartbeatTransportSecure(req, agent)) {
     agent.lastHeartbeatSecure = false; agent.updatedAt = new Date().toISOString(); writeStore(agentFile, agents);
     return json(res, 426, { error: 'Agent 控制通道不安全：请将控制面板地址迁移到 HTTPS（仅本机回环地址允许 HTTP）', code: 'CONTROLLER_HTTPS_REQUIRED' });
@@ -588,16 +691,26 @@ async function handleAgentGateway(req, res, parts) {
   await reconcileExpiredUsers();
   agents = readAgents(); agent = agents.find(item => item.id === agentId);
   if (!agent || !secureTokenMatch(agent.token, supplied)) return json(res, 401, { error: 'Agent 身份验证失败' });
-  if (!agent.enabled) return json(res, 403, { error: '该 Agent 已被面板停用' });
-  const info = data.info && typeof data.info === 'object' ? data.info : data;
+  if (!agent.enabled) {
+    recordDisabledAgentHeartbeat(agent, agents, info);
+    return json(res, 403, { error: '该 Agent 已被面板停用' });
+  }
   const updateAck = cleanText(info.updateAck, '', 64); const updateFailedId = cleanText(info.updateFailedId, '', 64); const updateError = cleanText(info.updateError, '', 500);
   if (agent.updateRequestId && updateAck === agent.updateRequestId) { agent.lastUpdatedAt = new Date().toISOString(); agent.updateRequestId = ''; agent.updateRequestedAt = ''; agent.updateError = ''; }
   else if (agent.updateRequestId && updateFailedId === agent.updateRequestId) { agent.updateRequestId = ''; agent.updateRequestedAt = ''; agent.updateError = updateError || 'Agent 更新失败'; }
   const xrayInstallAck = cleanText(info.xrayInstallAck, '', 64); const xrayInstallFailedId = cleanText(info.xrayInstallFailedId, '', 64); const xrayInstallError = cleanText(info.xrayInstallError, '', 500);
   if (agent.xrayInstallRequestId && xrayInstallAck === agent.xrayInstallRequestId) { agent.xrayInstalledAt = new Date().toISOString(); agent.xrayInstallRequestId = ''; agent.xrayInstallRequestedAt = ''; agent.xrayInstallError = ''; }
   else if (agent.xrayInstallRequestId && xrayInstallFailedId === agent.xrayInstallRequestId) { agent.xrayInstallRequestId = ''; agent.xrayInstallRequestedAt = ''; agent.xrayInstallError = xrayInstallError || 'Xray Core 安装失败'; }
-  agent.version = cleanText(info.version, agent.version, 60); agent.hostname = cleanText(info.hostname, agent.hostname, 120); agent.platform = cleanText(info.platform, agent.platform, 80); agent.arch = cleanText(info.arch, agent.arch, 40); agent.nodeVersion = cleanText(info.nodeVersion, agent.nodeVersion, 40); agent.uptimeSeconds = Math.max(0, Number(info.uptimeSeconds || 0)); agent.memoryTotal = Math.max(0, Number(info.memoryTotal || 0)); agent.memoryFree = Math.max(0, Number(info.memoryFree || 0)); agent.cpus = Math.max(0, Number(info.cpus || 0)); agent.addresses = Array.isArray(info.addresses) ? info.addresses.filter(value => validText(value, 80)).slice(0, 20) : []; agent.processId = Math.max(0, Number(info.processId || 0)); agent.agentStartedAt = cleanText(info.agentStartedAt, agent.agentStartedAt, 64); agent.xrayAvailable = info.xrayAvailable === true; agent.xrayVersion = cleanText(info.xrayVersion, agent.xrayVersion, 100); agent.xrayInstalling = info.xrayInstalling === true; agent.inboundStates = normalizeAgentInboundStates(info.inboundStates); agent.relayStates = normalizeAgentRelayStates(info.relayStates); agent.lastHeartbeatSecure = true; agent.lastSeenAt = new Date().toISOString(); agent.updatedAt = agent.lastSeenAt;
-  writeStore(agentFile, agents); return json(res, 200, { ok: true, intervalSeconds: 15, relays: agentRelayTasks(agent.id), inbounds: agentInboundTasks(agent.id), xrayInstall: agent.xrayInstallRequestId ? { id: agent.xrayInstallRequestId, version: 'latest' } : null, update: agent.updateRequestId ? { id: agent.updateRequestId, url: `${agent.controllerUrl}/agent.js` } : null, agent: agentPublic(agent) });
+  const inboundStates = normalizeAgentInboundStates(info.inboundStates);
+  const relayStates = normalizeAgentRelayStates(info.relayStates);
+  agent.version = cleanText(info.version, agent.version, 60);
+  reconcileAgentRelayControls(agent, relayStates);
+  agent.version = cleanText(info.version, agent.version, 60); agent.hostname = cleanText(info.hostname, agent.hostname, 120); agent.platform = cleanText(info.platform, agent.platform, 80); agent.arch = cleanText(info.arch, agent.arch, 40); agent.nodeVersion = cleanText(info.nodeVersion, agent.nodeVersion, 40); agent.uptimeSeconds = Math.max(0, Number(info.uptimeSeconds || 0)); agent.memoryTotal = Math.max(0, Number(info.memoryTotal || 0)); agent.memoryFree = Math.max(0, Number(info.memoryFree || 0)); agent.cpus = Math.max(0, Number(info.cpus || 0)); agent.addresses = Array.isArray(info.addresses) ? info.addresses.filter(value => validText(value, 80)).slice(0, 20) : []; agent.processId = Math.max(0, Number(info.processId || 0)); agent.agentStartedAt = cleanText(info.agentStartedAt, agent.agentStartedAt, 64); agent.xrayAvailable = info.xrayAvailable === true; agent.xrayVersion = cleanText(info.xrayVersion, agent.xrayVersion, 100); agent.xrayInstalling = info.xrayInstalling === true; agent.inboundStates = inboundStates; agent.relayStates = relayStates; agent.lastHeartbeatSecure = true; agent.lastSeenAt = new Date().toISOString(); agent.updatedAt = agent.lastSeenAt;
+  writeStore(agentFile, agents);
+  const payload = { ok: true, intervalSeconds: 15, relays: agentRelayTasks(agent.id), inbounds: agentInboundTasks(agent.id), xrayInstall: agent.xrayInstallRequestId ? { id: agent.xrayInstallRequestId, version: 'latest' } : null, update: agent.updateRequestId ? { id: agent.updateRequestId, url: `${agent.controllerUrl}/agent.js` } : null, agent: agentPublic(agent) };
+  json(res, 200, payload);
+  markAgentRelayControlsDelivered(agent.id);
+  return undefined;
 }async function handleAgents(req, res, parts) {
   const agentId = cleanText(parts[2], '', 80);
   if (parts.length === 2 && req.method === 'GET') return json(res, 200, readAgents().map(agentPublic));
@@ -609,29 +722,117 @@ async function handleAgentGateway(req, res, parts) {
   }
   const patchData = req.method === 'PATCH' ? await body(req) : null; const agents = readAgents(); const agent = agents.find(item => item.id === agentId); if (!agent) return json(res, 404, { error: 'Not found' });
   if (parts.length === 5 && parts[3] === 'xray' && parts[4] === 'install' && req.method === 'POST') {
-    if (agent.xrayInstallRequestId) return json(res, 409, { error: '该 Agent 已有待执行的 Xray Core 安装任务', agent: agentPublic(agent) });
-    agent.xrayInstallRequestId = token(12); agent.xrayInstallRequestedAt = new Date().toISOString(); agent.xrayInstallError = ''; agent.updatedAt = agent.xrayInstallRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发 Xray Core 安装任务，等待 Agent 执行。' });
+    if (!agent.enabled) return json(res, 409, { error: 'Agent 已停用，无法下发维护任务', agent: agentPublic(agent) });
+    if (agentStatus(agent) !== 'online') return json(res, 409, { error: 'Agent 当前离线，请等待心跳恢复后再安装 Xray Core', agent: agentPublic(agent) });
+    if (agent.updateRequestId) return json(res, 409, { error: 'Agent 更新任务执行期间不能安装 Xray Core', agent: agentPublic(agent) });
+    if (agent.xrayInstallRequestId || agent.xrayInstalling) return json(res, 409, { error: '该 Agent 已有正在等待或执行的 Xray Core 安装任务', agent: agentPublic(agent) });
+    agent.xrayInstallRequestId = token(12); agent.xrayInstallRequestedAt = new Date().toISOString(); agent.xrayInstallError = ''; agent.maintenanceCancelledAt = ''; agent.maintenanceCancelledReason = ''; agent.updatedAt = agent.xrayInstallRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发 Xray Core 安装任务，等待 Agent 执行。' });
   }
   if (parts.length === 4 && parts[3] === 'update' && req.method === 'POST') {
+    if (!agent.enabled) return json(res, 409, { error: 'Agent 已停用，无法下发维护任务', agent: agentPublic(agent) });
+    if (agentStatus(agent) !== 'online') return json(res, 409, { error: 'Agent 当前离线，请等待心跳恢复后再更新', agent: agentPublic(agent) });
+    if (agent.xrayInstallRequestId || agent.xrayInstalling) return json(res, 409, { error: 'Xray Core 安装期间不能更新 Agent', agent: agentPublic(agent) });
     if (agent.updateRequestId) return json(res, 409, { error: '该 Agent 已有待执行的更新任务', agent: agentPublic(agent) });
-    agent.updateRequestId = token(12); agent.updateRequestedAt = new Date().toISOString(); agent.updateError = ''; agent.updatedAt = agent.updateRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发更新请求，等待 Agent 心跳执行。' });
+    agent.updateRequestId = token(12); agent.updateRequestedAt = new Date().toISOString(); agent.updateError = ''; agent.maintenanceCancelledAt = ''; agent.maintenanceCancelledReason = ''; agent.updatedAt = agent.updateRequestedAt; writeStore(agentFile, agents); return json(res, 202, { agent: agentPublic(agent), message: '已下发更新请求，等待 Agent 心跳执行。' });
   }
   if (parts.length === 4 && parts[3] === 'bootstrap' && req.method === 'GET') { auditOnFinish(req, res, currentSession(req), 'admin.agent.bootstrap.read', `/api/agents/${agent.id}/bootstrap`); return json(res, 200, { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token }); }
-  if (req.method === 'PATCH') { const data = patchData; if (data.enabled !== undefined) agent.enabled = Boolean(data.enabled); if (data.controllerUrl !== undefined) { const target = controllerUrl(data.controllerUrl); if (!target) return json(res, 400, { error: '控制面板地址必须为无账号、无路径、无查询参数的 HTTPS 根地址；仅 localhost、127.0.0.0/8 或 [::1] 可使用 HTTP' }); agent.controllerUrl = target; } if (data.name !== undefined) { const name = cleanText(data.name, '', 80); if (!name) return json(res, 400, { error: '机器名称不能为空' }); agent.name = name; } if (data.rotateToken === true) agent.token = token(32); agent.updatedAt = new Date().toISOString(); writeStore(agentFile, agents); return json(res, 200, { agent: agentPublic(agent), deployment: (data.rotateToken === true || data.controllerUrl !== undefined) ? { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } : undefined }); }
+  if (req.method === 'PATCH') {
+    const data = patchData;
+    const maintenanceBusy = Boolean(agent.updateRequestId || agent.xrayInstallRequestId || agent.xrayInstalling);
+    if (data.rotateToken === true && maintenanceBusy) return json(res, 409, { error: '维护任务执行期间不能轮换 Agent 令牌', agent: agentPublic(agent) });
+    if (data.enabled !== undefined) {
+      const nextEnabled = Boolean(data.enabled);
+      if (nextEnabled !== agent.enabled) {
+        const now = new Date().toISOString();
+        agent.enabled = nextEnabled;
+        if (nextEnabled) {
+          agent.lastSeenAt = '';
+          agent.disableRequestedAt = '';
+          agent.disabledAckAt = '';
+          agent.lastDisabledSeenAt = '';
+        } else {
+          agent.disableRequestedAt = now;
+          agent.disabledAckAt = '';
+          if (maintenanceBusy) {
+            agent.updateRequestId = '';
+            agent.updateRequestedAt = '';
+            agent.xrayInstallRequestId = '';
+            agent.xrayInstallRequestedAt = '';
+            agent.maintenanceCancelledAt = now;
+            agent.maintenanceCancelledReason = '管理员停用 Agent，已撤销未确认的维护任务';
+          }
+        }
+      }
+    }
+    if (data.controllerUrl !== undefined) {
+      const target = controllerUrl(data.controllerUrl);
+      if (!target) return json(res, 400, { error: '控制面板地址必须为无账号、无路径、无查询参数的 HTTPS 根地址；仅 localhost、127.0.0.0/8 或 [::1] 可使用 HTTP' });
+      if (target !== agent.controllerUrl) { agent.controllerUrl = target; agent.lastSeenAt = ''; }
+    }
+    if (data.name !== undefined) {
+      const name = cleanText(data.name, '', 80);
+      if (!name) return json(res, 400, { error: '机器名称不能为空' });
+      agent.name = name;
+    }
+    if (data.rotateToken === true) { agent.token = token(32); agent.lastSeenAt = ''; }
+    agent.updatedAt = new Date().toISOString();
+    writeStore(agentFile, agents);
+    return json(res, 200, { agent: agentPublic(agent), deployment: (data.rotateToken === true || data.controllerUrl !== undefined) ? { command: agentCommand(agent), controllerUrl: agent.controllerUrl, id: agent.id, token: agent.token } : undefined });
+  }
   if (req.method === 'DELETE') { const assignedInbounds = readStore(inboundFile, seedInbounds, normalizeInbound).filter(item => item.agentId === agentId); const assignedRelays = readStore(relayFile, seedRelays, normalizeRelay).filter(item => item.agentId === agentId); if (assignedInbounds.length || assignedRelays.length) return json(res, 409, { error: '该 Agent 仍承载 ' + assignedInbounds.length + ' 个入站和 ' + assignedRelays.length + ' 条中转，请先迁移或删除这些资源' }); writeStore(agentFile, agents.filter(item => item.id !== agentId)); return json(res, 204); }
   return json(res, 405, { error: 'Method not allowed' });
 }function normalizeRelay(item) {
   if (!item || typeof item !== 'object') return item;
-  if (Number.isInteger(Number(item.listenPort)) && validText(item.targetHost) && Number.isInteger(Number(item.targetPort))) return { ...item, listenPort: Number(item.listenPort), targetPort: Number(item.targetPort), transport: ['tcp', 'udp', 'tcp+udp'].includes(item.transport) ? item.transport : 'tcp', bindAddress: cleanText(item.bindAddress, '0.0.0.0', 80), agentId: cleanText(item.agentId, '', 80), runtimeStatus: item.runtimeStatus || 'stopped', lastError: item.lastError || '', bytesIn: Number(item.bytesIn || 0), bytesOut: Number(item.bytesOut || 0), connections: Number(item.connections || 0) };
+  if (Number.isInteger(Number(item.listenPort)) && validText(item.targetHost) && Number.isInteger(Number(item.targetPort))) return { ...item, listenPort: Number(item.listenPort), targetPort: Number(item.targetPort), transport: ['tcp', 'udp', 'tcp+udp'].includes(item.transport) ? item.transport : 'tcp', bindAddress: cleanText(item.bindAddress, '0.0.0.0', 80), agentId: cleanText(item.agentId, '', 80), runtimeStatus: item.runtimeStatus || 'stopped', lastError: item.lastError || '', bytesIn: Number(item.bytesIn || 0), bytesOut: Number(item.bytesOut || 0), connections: Number(item.connections || 0), pendingRemoteAction: ['stop', 'delete'].includes(item.pendingRemoteAction) ? item.pendingRemoteAction : '', pendingRemoteRevision: cleanText(item.pendingRemoteRevision, '', 128), pendingRemoteRequestedAt: cleanText(item.pendingRemoteRequestedAt, '', 64), pendingRemoteDeliveredAt: cleanText(item.pendingRemoteDeliveredAt, '', 64) };
   return { ...item, transport: item.transport || 'tcp', listenPort: null, targetHost: '', targetPort: null, agentId: '', runtimeStatus: 'legacy', lastError: '旧版线路档案：请新建含监听端口与目标地址的转发规则。', bytesIn: 0, bytesOut: 0, connections: 0 };
 }
+function agentSupportsRelayRevision(agent) {
+  const match = String(agent?.version || '').match(/^v?(\d+)\.(\d+)\.(\d+)/); if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number); return major > 0 || minor > 5 || (minor === 5 && patch >= 6);
+}
+function agentSupportsInboundRevision(agent) {
+  const match = String(agent?.version || '').match(/^v?(\d+)\.(\d+)\.(\d+)/); if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number); return major > 0 || minor > 5 || (minor === 5 && patch >= 7);
+}
+function agentSupportsWorkloadStopAck(agent) {
+  const match = String(agent?.version || '').match(/^v?(\d+)\.(\d+)\.(\d+)/); if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number); return major > 0 || minor > 5 || (minor === 5 && patch >= 7);
+}
 function remoteRelaySnapshot(rule, context) {
-  const agent = context?.agentsById ? context.agentsById.get(rule.agentId) : readAgents().find(item => item.id === rule.agentId); const agentState = agent?.relayStates?.find(item => item.id === rule.id);
-  const status = rule.status !== 'running' ? 'stopped' : !agent ? 'error' : agentStatus(agent) === 'online' ? (agentState?.status || 'starting') : agentStatus(agent);
-  return { ...rule, runtimeStatus: status, lastError: status === 'error' ? (agentState?.lastError || '远程 Agent 不存在或规则启动失败') : (agentState?.lastError || ''), bytesIn: Number(agentState?.bytesIn || 0), bytesOut: Number(agentState?.bytesOut || 0), connections: Number(agentState?.connections || 0), agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
-}function relaySnapshot(rule, context) {
+  const agent = context?.agentsById ? context.agentsById.get(rule.agentId) : readAgents().find(item => item.id === rule.agentId);
+  const agentState = agent?.relayStates?.find(item => item.id === rule.id);
+  const revision = relayRevision(rule);
+  const appliedRevision = agentState?.revision || '';
+  const connectivity = agent ? agentStatus(agent) : 'missing';
+  const disablePending = agentDisablePending(agent);
+  if (rule.pendingRemoteAction) {
+    const actionLabel = rule.pendingRemoteAction === 'delete' ? '删除' : '停止';
+    const lastError = !agent
+      ? `Agent 不存在，无法确认${actionLabel}远程规则`
+      : !agentSupportsWorkloadStopAck(agent)
+        ? 'Agent 版本不支持可信停止确认；请通过部署命令升级至 v0.5.7 或更高版本'
+        : connectivity === 'online'
+        ? `等待 Agent 确认${actionLabel}远程规则`
+          : connectivity === 'offline'
+            ? `Agent 离线，等待恢复连接后${actionLabel}远程规则`
+            : connectivity === 'disabled'
+              ? `Agent 已停用，等待其确认工作负载已停止后${actionLabel}远程规则`
+              : `Agent 不存在，无法确认${actionLabel}远程规则`;
+    return { ...rule, revision, appliedRevision, runtimeStatus: 'stopping', lastError, pendingRemote: true, pendingRemoteDelivered: Boolean(rule.pendingRemoteDeliveredAt), agentStatus: connectivity, bytesIn: Number(agentState?.bytesIn || 0), bytesOut: Number(agentState?.bytesOut || 0), connections: Number(agentState?.connections || 0), agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
+  }
+  const revisionMatches = appliedRevision ? appliedRevision === revision : !agentSupportsRelayRevision(agent);
+  if (rule.status === 'running' && disablePending) return { ...rule, revision, appliedRevision, runtimeStatus: 'stopping', lastError: agentSupportsWorkloadStopAck(agent) ? '等待 Agent 确认全部工作负载已停止；确认前远端仍可能继续转发' : 'Agent 版本不支持可信停止确认；请通过部署命令升级至 v0.5.7 或更高版本', pendingDisable: true, agentStatus: connectivity, bytesIn: revisionMatches ? Number(agentState?.bytesIn || 0) : 0, bytesOut: revisionMatches ? Number(agentState?.bytesOut || 0) : 0, connections: revisionMatches ? Number(agentState?.connections || 0) : 0, agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
+  const status = rule.status !== 'running' ? 'stopped' : !agent ? 'error' : connectivity === 'online' ? (revisionMatches ? (agentState?.status || 'starting') : 'starting') : connectivity;
+  const lastError = !revisionMatches ? '' : status === 'error' ? (agentState?.lastError || '远程 Agent 不存在或规则启动失败') : (agentState?.lastError || '');
+  return { ...rule, revision, appliedRevision, runtimeStatus: status, lastError, bytesIn: revisionMatches ? Number(agentState?.bytesIn || 0) : 0, bytesOut: revisionMatches ? Number(agentState?.bytesOut || 0) : 0, connections: revisionMatches ? Number(agentState?.connections || 0) : 0, agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
+}
+function relaySnapshot(rule, context) {
   if (rule.agentId) return remoteRelaySnapshot(rule, context);
-  const runtime = relayRuntimes.get(rule.id); if (!runtime) return { ...rule, runtimeStatus: rule.runtimeStatus === 'legacy' ? 'legacy' : 'stopped' };
+  const runtime = relayRuntimes.get(rule.id); if (!runtime) {
+    if (rule.runtimeStatus === 'legacy') return { ...rule, runtimeStatus: 'legacy' };
+    if (rule.runtimeStatus === 'error' || rule.status === 'running') return { ...rule, runtimeStatus: 'error', lastError: rule.lastError || '规则已启用，但监听进程未运行' };
+    return { ...rule, runtimeStatus: 'stopped' };
+  }
   return { ...rule, runtimeStatus: runtime.status, lastError: runtime.lastError || rule.lastError || '', bytesIn: runtime.bytesIn, bytesOut: runtime.bytesOut, connections: runtime.connections };
 }
 function inboundSnapshot(inbound, context) {
@@ -644,8 +845,16 @@ function inboundSnapshot(inbound, context) {
     return { ...inbound, lastError: '' };
   }
   const tlsError = inboundTlsError(inbound); if (tlsError) return { ...inbound, status: 'error', desiredStatus: inbound.status, lastError: tlsError };
-  const agent = context?.agentsById ? context.agentsById.get(inbound.agentId) : readAgents().find(item => item.id === inbound.agentId); const reported = agent?.inboundStates?.find(item => item.id === inbound.id); const state = inbound.status !== 'running' ? 'stopped' : !agent ? 'error' : agentStatus(agent) === 'online' ? (reported?.status || 'starting') : agentStatus(agent);
-  return { ...inbound, status: state, desiredStatus: inbound.status, lastError: state === 'error' ? (reported?.lastError || (agent?.xrayAvailable === false ? 'Agent 未检测到 Xray Core' : '远程节点启动失败')) : (reported?.lastError || ''), agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
+  const agent = context?.agentsById ? context.agentsById.get(inbound.agentId) : readAgents().find(item => item.id === inbound.agentId);
+  const reported = agent?.inboundStates?.find(item => item.id === inbound.id);
+  const revision = inboundRevision(inbound);
+  const appliedRevision = reported?.revision || '';
+  const revisionMatches = appliedRevision ? appliedRevision === revision : !agentSupportsInboundRevision(agent);
+  const connectivity = agent ? agentStatus(agent) : 'missing';
+  const disablePending = agentDisablePending(agent);
+  const state = inbound.status !== 'running' ? 'stopped' : !agent ? 'error' : disablePending ? 'stopping' : connectivity === 'online' ? (revisionMatches ? (reported?.status || 'starting') : 'starting') : connectivity;
+  const lastError = inbound.status !== 'running' ? '' : state === 'stopping' ? (agentSupportsWorkloadStopAck(agent) ? '等待 Agent 确认全部工作负载已停止；确认前远端仍可能继续提供入站' : 'Agent 版本不支持可信停止确认；请通过部署命令升级至 v0.5.7 或更高版本') : !revisionMatches ? '等待 Agent 应用最新入站配置' : state === 'error' ? (reported?.lastError || (agent?.xrayAvailable === false ? 'Agent 未检测到 Xray Core' : '远程节点启动失败')) : state === 'offline' ? 'Agent 离线，等待恢复连接后应用入站配置' : state === 'disabled' ? (agent?.disabledAckAt ? 'Agent 已停用，远端入站已确认停止' : 'Agent 已停用，无法应用入站配置') : (reported?.lastError || '');
+  return { ...inbound, revision, appliedRevision, revisionPending: !revisionMatches, pendingDisable: disablePending, status: state, desiredStatus: inbound.status, lastError, agentName: agent?.name || '未知 Agent', agentLastSeenAt: agent?.lastSeenAt || '' };
 }function tcpReachable(host, port, timeout = 3500) {
   return new Promise(resolve => {
     const socket = net.connect({ host, port }); let done = false;
@@ -696,39 +905,54 @@ async function diagnoseInbound(inbound, repair = false) {
 function relayTraffic(runtime, direction, size) { if (direction === 'in') runtime.bytesIn += size; else runtime.bytesOut += size; }
 function createTcpRelay(rule, runtime) {
   const server = net.createServer(client => {
-    runtime.connections++; const upstream = net.connect({ host: rule.targetHost, port: rule.targetPort }); let closed = false;
-    const close = () => { if (closed) return; closed = true; runtime.connections = Math.max(0, runtime.connections - 1); client.destroy(); upstream.destroy(); };
+    runtime.connections++; const upstream = net.connect({ host: rule.targetHost, port: rule.targetPort }); let closed = false; runtime.sockets.add(client); runtime.sockets.add(upstream);
+    const close = () => { if (closed) return; closed = true; runtime.connections = Math.max(0, runtime.connections - 1); runtime.sockets.delete(client); runtime.sockets.delete(upstream); client.destroy(); upstream.destroy(); };
     client.on('data', chunk => relayTraffic(runtime, 'in', chunk.length)); upstream.on('data', chunk => relayTraffic(runtime, 'out', chunk.length));
     client.on('error', error => { runtime.lastError = error.message; close(); }); upstream.on('error', error => { runtime.lastError = error.message; close(); }); client.on('close', close); upstream.on('close', close); client.pipe(upstream); upstream.pipe(client);
   });
   runtime.servers.push(server); return new Promise((resolve, reject) => { const fail = error => reject(error); server.once('error', fail); server.listen(rule.listenPort, rule.bindAddress, () => { server.removeListener('error', fail); server.on('error', error => { runtime.status = 'error'; runtime.lastError = error.message; }); resolve(); }); });
 }
-function closeUdpClients(clients) {
+function closeUdpClients(clients, runtime) {
+  const count = clients.size;
   for (const entry of clients.values()) { if (entry?.timer) clearTimeout(entry.timer); try { (entry?.socket || entry).close(); } catch {} }
   clients.clear();
+  if (runtime) runtime.connections = Math.max(0, runtime.connections - count);
 }
 function createUdpRelay(rule, runtime) {
   const server = dgram.createSocket('udp4'); const clients = new Map(); const idleMs = 2 * 60 * 1000; runtime.servers.push(server); runtime.udpClients = clients;
   server.on('message', (message, remote) => {
     relayTraffic(runtime, 'in', message.length); const key = `${remote.address}:${remote.port}`; let entry = clients.get(key);
     if (!entry) {
-      const socket = dgram.createSocket('udp4'); entry = { socket, timer: null };
-      const closeEntry = () => { if (entry.timer) clearTimeout(entry.timer); if (clients.get(key) === entry) clients.delete(key); try { socket.close(); } catch {} };
+      const socket = dgram.createSocket('udp4'); entry = { socket, timer: null, connected: false, pending: [] };
+      const closeEntry = () => { if (entry.timer) clearTimeout(entry.timer); if (clients.get(key) === entry) { clients.delete(key); runtime.connections = Math.max(0, runtime.connections - 1); } try { socket.close(); } catch {} };
       const refresh = () => { if (entry.timer) clearTimeout(entry.timer); entry.timer = setTimeout(closeEntry, idleMs); entry.timer.unref?.(); };
-      entry.refresh = refresh; socket.on('message', reply => { relayTraffic(runtime, 'out', reply.length); server.send(reply, remote.port, remote.address); refresh(); }); socket.on('error', error => { runtime.lastError = error.message; closeEntry(); }); clients.set(key, entry);
+      const send = packet => { if (clients.get(key) !== entry) return; socket.send(packet, error => { if (error) { runtime.lastError = error.message; closeEntry(); } }); };
+      entry.refresh = refresh; entry.send = send; socket.on('message', reply => { relayTraffic(runtime, 'out', reply.length); server.send(reply, remote.port, remote.address, error => { if (error) runtime.lastError = error.message; }); refresh(); }); socket.on('error', error => { runtime.lastError = error.message; closeEntry(); }); clients.set(key, entry); runtime.connections++;
+      try { socket.connect(rule.targetPort, rule.targetHost, () => { if (clients.get(key) !== entry) return; entry.connected = true; const pending = entry.pending.splice(0); for (const packet of pending) send(packet); refresh(); }); }
+      catch (error) { runtime.lastError = error.message; closeEntry(); return; }
     }
-    entry.refresh(); entry.socket.send(message, rule.targetPort, rule.targetHost);
+    entry.refresh();
+    if (entry.connected) entry.send(message);
+    else if (entry.pending.length < 32) entry.pending.push(Buffer.from(message));
+    else runtime.lastError = `UDP 会话 ${key} 等待目标连接时数据包过多`;
   });
   return new Promise((resolve, reject) => { const fail = error => reject(error); server.once('error', fail); server.bind(rule.listenPort, rule.bindAddress, () => { server.removeListener('error', fail); server.on('error', error => { runtime.status = 'error'; runtime.lastError = error.message; }); resolve(); }); });
-}async function startRelay(rule) {
+}
+function closeRelayServer(server) { return new Promise(resolve => { try { server.close(resolve); } catch { resolve(); } }); }
+async function closeRelayRuntime(runtime) {
+  for (const socket of runtime.sockets) try { socket.destroy(); } catch {}
+  runtime.sockets.clear(); closeUdpClients(runtime.udpClients, runtime);
+  const servers = runtime.servers.splice(0); await Promise.allSettled(servers.map(closeRelayServer)); runtime.connections = 0;
+}
+async function startRelay(rule) {
   if (!Number.isInteger(rule.listenPort) || !validText(rule.targetHost) || !Number.isInteger(rule.targetPort)) throw new Error('请填写有效监听端口、目标地址和目标端口');
   if (readStore(inboundFile, seedInbounds, normalizeInbound).some(inbound => !inbound.agentId && inbound.status === 'running' && inbound.port === rule.listenPort)) throw new Error('监听端口与本机已启用入站冲突');
   if (relayRuntimes.has(rule.id)) return relaySnapshot(rule);
-  const runtime = { status: 'starting', servers: [], udpClients: new Map(), bytesIn: 0, bytesOut: 0, connections: 0, lastError: '' }; relayRuntimes.set(rule.id, runtime);
+  const runtime = { status: 'starting', servers: [], sockets: new Set(), udpClients: new Map(), bytesIn: 0, bytesOut: 0, connections: 0, lastError: '' }; relayRuntimes.set(rule.id, runtime);
   try { if (rule.transport === 'tcp' || rule.transport === 'tcp+udp') await createTcpRelay(rule, runtime); if (rule.transport === 'udp' || rule.transport === 'tcp+udp') await createUdpRelay(rule, runtime); runtime.status = 'running'; return relaySnapshot(rule); }
-  catch (error) { for (const server of runtime.servers) try { server.close(); } catch {} closeUdpClients(runtime.udpClients); relayRuntimes.delete(rule.id); throw error; }
+  catch (error) { await closeRelayRuntime(runtime); relayRuntimes.delete(rule.id); throw error; }
 }
-function stopRelay(id) { const runtime = relayRuntimes.get(id); if (!runtime) return; for (const server of runtime.servers) try { server.close(); } catch {} closeUdpClients(runtime.udpClients); relayRuntimes.delete(id); }
+async function stopRelay(id) { const runtime = relayRuntimes.get(id); if (!runtime) return; runtime.status = 'stopping'; await closeRelayRuntime(runtime); if (relayRuntimes.get(id) === runtime) relayRuntimes.delete(id); }
 function createRelay(data) {
   const agentId = cleanText(data.agentId, '', 80); const listenPort = Number(data.listenPort); const targetPort = Number(data.targetPort); const transport = cleanText(data.transport, 'tcp', 16);
   if (!validText(data.name) || !validText(data.targetHost) || !Number.isInteger(listenPort) || listenPort < 1 || listenPort > 65535 || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535 || !['tcp', 'udp', 'tcp+udp'].includes(transport)) return null;
@@ -806,7 +1030,7 @@ async function handleRelays(req, res, parts) {
     const relay = createRelay(await body(req)); if (!relay) return json(res, 400, { error: '请填写规则名称、协议、监听端口与目标地址' }); const agents = readAgents();
     if (relay.agentId && !agents.some(agent => agent.id === relay.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const relays = readStore(relayFile, seedRelays, normalizeRelay); const inbounds = readStore(inboundFile, seedInbounds, normalizeInbound);
     const conflicts = executionPortConflicts(inbounds, relays, relay.agentId, relay.listenPort); if (conflicts.inbound) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' });
-    if (relayPortConflict(relays, relay)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' }); relays.unshift(relay); writeStore(relayFile, relays); await activateRelayRule(relay); if (!persistRelayState(relay) && !relay.agentId) stopRelay(relay.id); return json(res, 201, relaySnapshot(relay));
+    if (relayPortConflict(relays, relay)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' }); relays.unshift(relay); writeStore(relayFile, relays); await activateRelayRule(relay); if (!persistRelayState(relay) && !relay.agentId) await stopRelay(relay.id); return json(res, 201, relaySnapshot(relay));
   }
   if (!Number.isInteger(relayId)) return json(res, 404, { error: 'Not found' });
   if (parts.length === 4 && parts[3] === 'diagnose' && req.method === 'POST') { const relay = readStore(relayFile, seedRelays, normalizeRelay).find(item => item.id === relayId); if (!relay) return json(res, 404, { error: 'Not found' }); return json(res, 200, await diagnoseRelay(relay)); }
@@ -815,18 +1039,56 @@ async function handleRelays(req, res, parts) {
     if (Object.keys(data).length === 1 && Object.prototype.hasOwnProperty.call(data, 'status')) {
       if (!statuses.has(data.status)) return json(res, 400, { error: '状态无效' });
       if (data.status === 'running') { const conflicts = executionPortConflicts(readStore(inboundFile, seedInbounds, normalizeInbound), relays, relay.agentId, relay.listenPort, { relayId }); if (conflicts.inbound) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); if (relayPortConflict(relays, relay, relayId)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' }); }
+      if (relay.agentId) {
+        const executor = readAgents().find(agent => agent.id === relay.agentId);
+        if (data.status === 'running' && (!executor || !executor.enabled)) return json(res, 409, { error: '执行 Agent 不存在或已停用，请先恢复 Agent 后再启用中转', relay: relaySnapshot(relay) });
+        if (data.status === 'stopped' && agentWorkloadsStopConfirmed(executor)) { clearRemoteRelayControl(relay); relay.status = 'stopped'; relay.runtimeStatus = 'stopped'; relay.lastError = ''; relay.updatedAt = new Date().toISOString(); writeStore(relayFile, relays); return json(res, 200, relaySnapshot(relay)); }
+        if (data.status === 'stopped') requestRemoteRelayControl(relay, 'stop');
+        else { clearRemoteRelayControl(relay); relay.status = 'running'; relay.runtimeStatus = 'starting'; relay.lastError = ''; relay.updatedAt = new Date().toISOString(); }
+        writeStore(relayFile, relays);
+        return json(res, data.status === 'stopped' ? 202 : 200, relaySnapshot(relay));
+      }
       relay.status = data.status; relay.updatedAt = new Date().toISOString();
-      if (relay.agentId) { relay.runtimeStatus = data.status === 'running' ? 'starting' : 'stopped'; relay.lastError = ''; }
-      else if (data.status === 'stopped') { stopRelay(relay.id); relay.runtimeStatus = 'stopped'; relay.lastError = ''; }
+      if (data.status === 'stopped') { await stopRelay(relay.id); relay.runtimeStatus = 'stopped'; relay.lastError = ''; }
       writeStore(relayFile, relays);
-      if (!relay.agentId && data.status === 'running') { await activateRelayRule(relay); if (!persistRelayState(relay)) stopRelay(relay.id); }
+      if (data.status === 'running') { await activateRelayRule(relay); if (!persistRelayState(relay)) await stopRelay(relay.id); }
       return json(res, 200, relaySnapshot(relay));
     }
+    if (relay.pendingRemoteAction) return json(res, 409, { error: '远程规则正在等待 Agent 确认停止或删除，请稍后再编辑', relay: relaySnapshot(relay) });
     const updated = updateRelay(relay, data); if (!updated) return json(res, 400, { error: '规则名称、协议、监听端口与目标地址必须有效' }); const agents = readAgents();
     if (updated.agentId && !agents.some(agent => agent.id === updated.agentId && agent.enabled)) return json(res, 400, { error: '指定的 Agent 不存在或已停用' }); const conflicts = executionPortConflicts(readStore(inboundFile, seedInbounds, normalizeInbound), relays, updated.agentId, updated.listenPort, { relayId }); if (conflicts.inbound) return json(res, 409, { error: '该执行节点的监听端口已被入站占用' }); if (relayPortConflict(relays, updated, relayId)) return json(res, 409, { error: '该执行节点上监听端口与现有规则的传输协议冲突' });
-    if (!relay.agentId) stopRelay(relay.id); relays[index] = updated; writeStore(relayFile, relays); if (updated.status === 'running') { await activateRelayRule(updated); if (!persistRelayState(updated) && !updated.agentId) stopRelay(updated.id); } return json(res, 200, relaySnapshot(updated));
+    const oldLocal = !relay.agentId; const nextLocalRunning = !updated.agentId && updated.status === 'running';
+    if (oldLocal) await stopRelay(relay.id);
+    if (nextLocalRunning) {
+      try { const snapshot = await startRelay(updated); Object.assign(updated, snapshot, { runtimeStatus: 'running', lastError: '' }); }
+      catch (error) {
+        let rollbackError = '';
+        if (oldLocal && relay.status === 'running') {
+          try { const restored = await startRelay(relay); Object.assign(relay, restored, { runtimeStatus: 'running', lastError: '' }); }
+          catch (restoreError) { rollbackError = restoreError.message || '原规则恢复失败'; relay.runtimeStatus = 'error'; relay.lastError = `新配置启动失败：${error.message || error}；原规则恢复失败：${rollbackError}`; }
+        }
+        relays[index] = relay; writeStore(relayFile, relays);
+        const rolledBack = !rollbackError && oldLocal && relay.status === 'running';
+        return json(res, 409, { error: rolledBack ? `新配置启动失败，已恢复原规则：${error.message || error}` : `新配置启动失败${rollbackError ? `，且原规则恢复失败：${rollbackError}` : ''}：${error.message || error}`, rolledBack, relay: relaySnapshot(relay) });
+      }
+    }
+    relays[index] = updated; writeStore(relayFile, relays); return json(res, 200, relaySnapshot(updated));
   }
-  if (req.method === 'DELETE') { const relays = readStore(relayFile, seedRelays, normalizeRelay); const relay = relays.find(item => item.id === relayId); if (!relay) return json(res, 404, { error: 'Not found' }); if (!relay.agentId) stopRelay(relayId); writeStore(relayFile, relays.filter(item => item.id !== relayId)); return json(res, 204); }
+  if (req.method === 'DELETE') {
+    const relays = readStore(relayFile, seedRelays, normalizeRelay);
+    const relay = relays.find(item => item.id === relayId);
+    if (!relay) return json(res, 404, { error: 'Not found' });
+    if (relay.agentId) {
+      const executor = readAgents().find(agent => agent.id === relay.agentId);
+      if (agentWorkloadsStopConfirmed(executor)) { writeStore(relayFile, relays.filter(item => item.id !== relayId)); return json(res, 204); }
+      requestRemoteRelayControl(relay, 'delete');
+      writeStore(relayFile, relays);
+      return json(res, 202, { pending: true, relay: relaySnapshot(relay) });
+    }
+    await stopRelay(relayId);
+    writeStore(relayFile, relays.filter(item => item.id !== relayId));
+    return json(res, 204);
+  }
   return json(res, 405, { error: 'Method not allowed' });
 }async function handleInbounds(req, res, parts) {
   const inboundId = Number(parts[2]);
@@ -1254,7 +1516,10 @@ if (require.main === module) {
   const panelHost = process.env.PANEL_HOST || '0.0.0.0';
   server.listen(port, panelHost, () => {
     console.log('3xUI Lite HTTP: http://' + panelHost + ':' + port);
-    for (const relay of readStore(relayFile, seedRelays, normalizeRelay)) if (relay.status === 'running' && relay.listenPort && !relay.agentId) startRelay(relay).catch(error => console.error(`Relay ${relay.name} failed: ${error.message}`));
+    for (const relay of readStore(relayFile, seedRelays, normalizeRelay)) if (relay.status === 'running' && relay.listenPort && !relay.agentId) {
+      const expectedUpdatedAt = relay.updatedAt;
+      startRelay(relay).then(snapshot => { Object.assign(relay, snapshot, { runtimeStatus: 'running', lastError: '' }); persistRelayState(relay, expectedUpdatedAt); }).catch(error => { relay.runtimeStatus = 'error'; relay.lastError = `启动监听失败：${error.message || error}`; persistRelayState(relay, expectedUpdatedAt); console.error(`Relay ${relay.name} failed: ${error.message}`); });
+    }
     if (runtimeConfig().inbounds.length) { const started = startRuntime(); if (started.error) { runtime.lastError = started.error; console.error(`Xray startup failed: ${started.error}`); } }
     reconcileExpiredUsers().catch(error => console.error(`User expiration reconciliation failed: ${error.message}`));
     setInterval(() => reconcileExpiredUsers().catch(error => console.error(`User expiration reconciliation failed: ${error.message}`)), 60 * 1000).unref();

@@ -30,7 +30,7 @@
       <a class="nav" href="#traffic" data-page="traffic">⌁　流量统计</a>
       <a class="nav" href="#system" data-page="system">⚙　系统设置</a>
     </nav>
-    <footer><i></i>控制面板可用<br><small>v0.7.2 · 商用运维版</small></footer>
+    <footer><i></i>控制面板可用<br><small>v0.8.0 · 商用运维版</small></footer>
   </aside>
   <div class="sidebar-scrim" id="sidebarScrim" aria-hidden="true"></div>
 
@@ -55,7 +55,26 @@
       </div>
     </section>
 
-    <section class="page" id="relays"><div class="heading"><div><label>RELAY CONTROL</label><h1>中转管理</h1><p>按“入口端口 → 执行机器 → 目标服务”管理本机与 Agent 中转规则。</p></div><button class="primary" id="newRelay">+ 新建中转</button></div><div class="tip"><b>⇄</b><div><strong>端口转发规则</strong><p>规则会实际监听 <code>绑定地址:监听端口</code>，由本机面板或指定 Agent 转发至目标主机。支持 TCP、UDP 或同端口 TCP + UDP；可直接编辑、诊断并查看执行状态与流量。</p></div></div><div class="tools"><label>⌕ <input id="search" aria-label="搜索中转规则" placeholder="搜索规则、监听端口或目标地址…"></label><div><button class="filter active" data-filter="all" aria-pressed="true">全部</button><button class="filter" data-filter="running" aria-pressed="false">运行中</button><button class="filter" data-filter="stopped" aria-pressed="false">已暂停</button><button class="filter" data-filter="error" aria-pressed="false">异常</button></div></div><div id="cards"></div></section>
+    <section class="page operations-page" id="relays">
+      <div class="heading operations-heading">
+        <div><label>RELAY OPERATIONS</label><h1>中转运营中心</h1><p>集中管理本机与边缘 Agent 的转发规则、链路状态、连接与流量。</p></div>
+        <div class="heading-actions"><span class="sync-state" id="relaySyncState" aria-live="polite">等待同步</span><button class="btn icon-btn" id="relayRefresh" aria-label="刷新中转状态">↻ 刷新</button><button class="primary" id="newRelay">+ 新建中转</button></div>
+      </div>
+      <div class="ops-metrics relay-metrics" aria-label="中转运行概况">
+        <article><span class="metric-icon violet">⇄</span><div><small>全部规则</small><strong id="relayTotalCount">0</strong><em>已登记线路</em></div></article>
+        <article><span class="metric-icon green">●</span><div><small>健康运行</small><strong id="relayRunningCount">0</strong><em id="relayAvailability">可用率 0%</em></div></article>
+        <article><span class="metric-icon red">!</span><div><small>需要处理</small><strong id="relayIssueCount">0</strong><em>异常 / 离线 / 下发中</em></div></article>
+        <article><span class="metric-icon blue">⇅</span><div><small>活跃连接</small><strong id="relayConnectionCount">0</strong><em id="relayTrafficTotal">累计 0 B</em></div></article>
+      </div>
+      <div class="tip operations-tip"><b>⇄</b><div><strong>生产线路说明</strong><p>规则会实际监听 <code>绑定地址:监听端口</code>，由面板或指定 Agent 转发到目标服务。编辑运行中线路会先验证新配置，异常时保留原线路；状态每 15 秒自动同步。</p></div></div>
+      <div class="operations-toolbar" aria-label="中转筛选工具">
+        <label class="search-field"><span>⌕</span><input id="search" aria-label="搜索中转规则" placeholder="搜索线路、端口、目标或 Agent…"></label>
+        <label class="select-field"><span>执行节点</span><select id="relayExecutorFilter" aria-label="按执行节点筛选"><option value="all">全部节点</option><option value="local">本机面板</option></select></label>
+        <div class="segmented" role="group" aria-label="按状态筛选"><button class="filter active" data-filter="all" aria-pressed="true">全部</button><button class="filter" data-filter="running" aria-pressed="false">运行中</button><button class="filter" data-filter="stopped" aria-pressed="false">已暂停</button><button class="filter" data-filter="error" aria-pressed="false">需处理</button></div>
+      </div>
+      <div class="batch-bar" id="relayBatchBar" hidden><div><strong id="relaySelectedCount">已选择 0 条</strong><span>批量操作会逐条执行并汇总结果</span></div><div><button class="btn" id="relayBatchEnable">批量启用</button><button class="btn" id="relayBatchPause">批量暂停</button><button class="btn" id="relayBatchDiagnose">批量诊断</button><button class="text-btn" id="relayBatchClear">取消选择</button></div></div>
+      <div id="cards" class="relay-list"></div>
+    </section>
 
     <section class="page" id="inbounds"><div class="heading"><div><label>INBOUND CONTROL</label><h1>入站管理</h1><p>自动按协议生成可导入的 Xray 配置与分享链接。</p></div><div class="heading-actions"><button class="btn" id="import3xuiInbound">导入 3x-ui 配置</button><button class="primary" id="newInbound">+ 新建入站</button></div></div><div class="tip"><b>◈</b><div><strong>协议模板</strong><p>支持 VLESS Reality、TCP、TLS、WebSocket + TLS、gRPC + TLS、Trojan TLS 与 Shadowsocks 2022。每项独立匹配配置模板；创建后会自动启动/重载本机 Core。请同时在云安全组和系统防火墙放行该节点端口。</p></div></div><div id="inboundCards" class="inbound-cards"></div></section>
 
@@ -69,7 +88,25 @@
   <article class="panel traffic-table"><div class="panelhead"><div><h3>最近记录</h3><p>流量写入历史</p></div></div><div id="trafficLog"></div></article>
 </section>
 
-    <section class="page" id="agents"><div class="heading"><div><label>AGENT CONTROL</label><h1>Agent 机器管理</h1><p>登记远程机器、查看心跳状态，并安全生成其启动命令。</p></div><button class="primary" id="newAgent">+ 添加 Agent</button></div><div class="tip"><b>◉</b><div><strong>部署方式</strong><p>请填写远程机器能访问到的面板 HTTPS 地址（同机回环可用 HTTP）。创建后将生成一枚独立令牌；在目标机器执行生成的命令即可；命令会自动下载并校验 <code>agent.js</code>，即会开始上报心跳。</p></div></div><div class="agent-summary"><article><b id="agentOnlineCount">0</b><span>在线 Agent</span></article><article><b id="agentTotalCount">0</b><span>已登记机器</span></article><article><b>90 秒</b><span>离线判定阈值</span></article></div><div id="agentCards" class="agent-cards"></div></section>
+    <section class="page operations-page" id="agents">
+      <div class="heading operations-heading">
+        <div><label>EDGE FLEET</label><h1>Agent 节点运营</h1><p>统一查看边缘机器健康、版本、任务状态和承载资源，并完成安全运维。</p></div>
+        <div class="heading-actions"><span class="sync-state" id="agentSyncState" aria-live="polite">等待同步</span><button class="btn icon-btn" id="agentRefresh" aria-label="刷新 Agent 状态">↻ 刷新</button><button class="primary" id="newAgent">+ 添加 Agent</button></div>
+      </div>
+      <div class="ops-metrics agent-ops-metrics" aria-label="Agent 运行概况">
+        <article><span class="metric-icon green">●</span><div><small>在线节点</small><strong id="agentOnlineCount">0</strong><em id="agentOnlineRate">在线率 0%</em></div></article>
+        <article><span class="metric-icon slate">○</span><div><small>离线 / 停用</small><strong id="agentOfflineCount">0</strong><em>90 秒未心跳判离线</em></div></article>
+        <article><span class="metric-icon red">!</span><div><small>需要处理</small><strong id="agentIssueCount">0</strong><em>版本 / Core / 安全 / 任务</em></div></article>
+        <article><span class="metric-icon blue">◆</span><div><small>承载资源</small><strong id="agentResourceCount">0</strong><em>已分配入站与中转</em></div></article>
+      </div>
+      <div class="tip operations-tip"><b>◉</b><div><strong>受控边缘节点</strong><p>远程 Agent 必须通过 HTTPS 接入（同机回环可用 HTTP）。控制台自动同步心跳与任务结果；令牌只在部署或轮换时展示，建议每台机器使用独立 Agent。</p></div></div>
+      <div class="operations-toolbar agent-toolbar" aria-label="Agent 筛选工具">
+        <label class="search-field"><span>⌕</span><input id="agentSearch" aria-label="搜索 Agent" placeholder="搜索名称、主机、IP 或机器 ID…"></label>
+        <label class="select-field"><span>节点状态</span><select id="agentStatusFilter" aria-label="按 Agent 状态筛选"><option value="all">全部状态</option><option value="online">在线</option><option value="offline">离线</option><option value="stopping">停用确认中</option><option value="disabled">已停用（已确认）</option><option value="issue">需要处理</option></select></label>
+        <button class="btn toolbar-action" id="updateOnlineAgents">更新在线 Agent</button>
+      </div>
+      <div id="agentCards" class="agent-cards fleet-cards"></div>
+    </section>
     <section class="page" id="system">
       <div class="heading"><div><label>OPERATIONS & SECURITY</label><h1>运维与安全中心</h1><p>集中管理访问安全、配置备份、操作审计、证书和 Xray Core。</p></div></div>
       <div class="system-grid">
@@ -99,6 +136,8 @@
   <dialog id="agentModal" aria-labelledby="agentModalTitle"><form id="agentForm"><div class="modalhead"><div><label>NEW AGENT</label><h2 id="agentModalTitle">添加 Agent 机器</h2></div><button type="button" data-close aria-label="关闭对话框">×</button></div><div class="form"><label>机器名称<input required name="name" placeholder="例如：香港入口 VPS"></label><label>面板控制地址<input required name="controllerUrl" id="agentControllerUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://panel.example.com"></label><p class="wide relay-form-help">同一台机器可使用 http://127.0.0.1:3000；远程 Agent 必须填写无路径、无查询参数的 HTTPS 根地址，否则令牌与节点密钥会暴露。</p></div><footer><button type="button" data-close>取消</button><button class="primary">创建并生成命令</button></footer></form></dialog>
   <dialog id="agentBootstrapModal" class="agent-bootstrap" aria-labelledby="agentBootstrapTitle"><div class="modalhead"><div><label>AGENT DEPLOYMENT</label><h2 id="agentBootstrapTitle">部署 Agent</h2></div><button type="button" data-close aria-label="关闭对话框">×</button></div><div class="agent-bootstrap-body"><p>此命令适用于 Linux + systemd：会下载最新 Agent、创建常驻服务、设为开机启动并立即运行。执行时需要 sudo 权限；运行后令牌会写入目标机器权限为 0600 的 agent.env；部署命令本身包含可解码的敏感令牌，请勿分享或长期保存，泄露后请立即轮换。</p><pre id="agentCommand"></pre><button class="primary" id="copyAgentCommand">复制启动命令</button></div><footer><button type="button" data-close>关闭</button></footer></dialog>
   <dialog id="agentDetailsModal" class="agent-details" aria-labelledby="agentDetailsTitle"><div class="modalhead"><div><label>AGENT DETAILS</label><h2 id="agentDetailsTitle">Agent 详情</h2></div><button type="button" data-close aria-label="关闭对话框">×</button></div><div class="agent-details-body" id="agentDetailsBody"></div><footer><button type="button" data-close>关闭</button></footer></dialog>
+  <dialog id="agentEditModal" aria-labelledby="agentEditTitle"><form id="agentEditForm"><div class="modalhead"><div><label>AGENT SETTINGS</label><h2 id="agentEditTitle">编辑 Agent</h2></div><button type="button" data-close aria-label="关闭对话框">×</button></div><div class="form"><label>机器名称<input required name="name" maxlength="80" placeholder="例如：香港入口 VPS"></label><label>面板控制地址<input required name="controllerUrl" type="url" inputmode="url" autocomplete="url" placeholder="https://panel.example.com"></label><input type="hidden" name="id"><p class="wide relay-form-help">修改控制地址后需要在目标机器重新执行部署命令；仅名称变化时不会影响在线服务。</p></div><footer><button type="button" data-close>取消</button><button class="primary">保存 Agent 设置</button></footer></form></dialog>
+  <dialog id="diagnosticsModal" class="diagnostics-modal" aria-labelledby="diagnosticsTitle"><div class="modalhead"><div><label>OPERATIONS REPORT</label><h2 id="diagnosticsTitle">线路诊断报告</h2></div><button type="button" data-close aria-label="关闭对话框">×</button></div><div class="diagnostics-body" id="diagnosticsBody"></div><footer><button type="button" class="btn" id="copyDiagnostics">复制报告</button><button type="button" data-close>关闭</button></footer></dialog>
   <div class="toast-stack" id="toastStack" aria-live="polite" aria-atomic="true"></div>
   <script src="app.js"></script>
 </body>

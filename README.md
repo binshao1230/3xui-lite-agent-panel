@@ -1,4 +1,4 @@
-# 3xUI Lite Agent Panel v0.7.2
+# 3xUI Lite Agent Panel v0.8.0
 
 面向 Linux VPS 的 Xray 管理与中转面板，提供协议配置模板、流量统计、Agent 管理、远程 TCP/UDP 中转、远程入站下发、Agent 自更新，以及远程安装 Xray Core 等能力。
 
@@ -41,7 +41,16 @@ curl -fsSL https://raw.githubusercontent.com/binshao1230/3xui-lite-agent-panel/m
 
 部署完成后，本轮发布的应用源码和依赖归 `root:root` 所有，组及其他用户写权限会被移除；已知敏感数据文件固定为 `0600`。升级失败时会恢复这些文件原有的所有权和权限。
 
-默认一键安装脚本固定下载 `v0.7.2` 标签。受控生产发布可将 `install.sh` 原始地址中的 `main` 固定为经过审核的完整 Git commit SHA，并通过 `REF` 指定同一标签或提交；如需跟随分支可显式传入 `BRANCH`。还可传入 `SOURCE_SHA256` 对下载的源码包进行 SHA-256 校验。
+默认一键安装脚本固定下载 `v0.8.0` 标签。受控生产发布可将 `install.sh` 原始地址中的 `main` 固定为经过审核的完整 Git commit SHA，并通过 `REF` 指定同一标签或提交；如需跟随分支可显式传入 `BRANCH`。还可传入 `SOURCE_SHA256` 对下载的源码包进行 SHA-256 校验。
+
+## v0.8.0 中转与 Agent 商用运营升级
+
+- 重构中转运营中心，增加实时 KPI、连接与流量统计、执行节点筛选、批量启停、线路诊断及自动同步。
+- 重构 Agent 节点运营，集中展示主机资源、版本、Xray 状态和承载资源，并支持顺序金丝雀更新与维护互斥。
+- 远程停止和删除改用 revision tombstone 与显式 ACK；确认前保持待处理状态，避免把离线或旧版 Agent 误判为已停止。
+- Agent 停用可原子撤销未确认维护任务，并在远端工作负载安全停止后确认；Agent v0.5.7 增强 TCP/UDP 会话回收、监听回滚和状态上报。
+- 完善响应式布局、深色模式、键盘焦点、状态中文化、视口菜单和 WCAG AA 小字号对比度。
+- 面板升级为 v0.8.0，Agent 升级为 v0.5.7；运行环境继续限定为 Node.js 22 LTS 或 24 LTS。
 
 ## v0.7.2 商用可靠性与安全加固
 

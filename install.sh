@@ -9,7 +9,7 @@ if [[ -n "${REF:-}" ]]; then
 elif [[ -n "${BRANCH}" ]]; then
   SOURCE_REF="refs/heads/${BRANCH}"
 else
-  SOURCE_REF="refs/tags/v0.7.2"
+  SOURCE_REF="refs/tags/v0.8.0"
 fi
 ARCHIVE_URL="${REPOSITORY%/}/archive/${SOURCE_REF}.tar.gz"
 TMP_DIR="$(mktemp -d)"

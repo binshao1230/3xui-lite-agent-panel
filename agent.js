@@ -9,7 +9,7 @@ const dgram = require('node:dgram');
 const http = require('node:http');
 const https = require('node:https');
 
-const AGENT_VERSION = '0.5.5';
+const AGENT_VERSION = '0.5.7';
 function option(name, fallback = '') { const index = process.argv.indexOf(`--${name}`); return index >= 0 ? (process.argv[index + 1] || '') : (process.env[`AGENT_${name.toUpperCase()}`] || fallback); }
 const controller = option('controller').replace(/\/$/, '');
 function controllerEndpointAllowed(value) {
@@ -47,8 +47,8 @@ async function stopXray() {
   return true;
 }
 function inboundStates() {
-  const states = new Map(xrayRuntime.tasks.map(task => [task.id, { id: task.id, status: xrayRuntime.status, lastError: xrayRuntime.lastError, updatedAt: new Date().toISOString() }]));
-  for (const task of xrayRuntime.rejectedTasks) states.set(task.id, { id: task.id, status: 'error', lastError: xrayRuntime.lastError || '新配置未应用', updatedAt: new Date().toISOString() });
+  const states = new Map(xrayRuntime.tasks.map(task => [task.id, { id: task.id, revision: String(task.revision || ''), status: xrayRuntime.status, lastError: xrayRuntime.lastError, updatedAt: new Date().toISOString() }]));
+  for (const task of xrayRuntime.rejectedTasks) states.set(task.id, { id: task.id, revision: String(task.revision || ''), status: 'error', lastError: xrayRuntime.lastError || '新配置未应用', updatedAt: new Date().toISOString() });
   return [...states.values()];
 }
 function verifyTcpListener(port) { return new Promise(resolve => { const socket = net.connect({ host: '127.0.0.1', port }); let done = false; const finish = value => { if (done) return; done = true; socket.destroy(); resolve(value); }; socket.setTimeout(1500); socket.once('connect', () => finish(true)); socket.once('error', () => finish(false)); socket.once('timeout', () => finish(false)); }); }
@@ -241,39 +241,59 @@ function postJson(urlText, payload) {
     request.end(data);
   });
 }
-function relayState(rule, runtime) { return { id: rule.id, status: runtime.status, lastError: runtime.lastError || '', bytesIn: runtime.bytesIn, bytesOut: runtime.bytesOut, connections: runtime.connections, updatedAt: new Date().toISOString() }; }
-function relayStates() { return [...relays.values()].map(item => relayState(item.rule, item.runtime)); }
-function stopRelay(relayId) { const item = relays.get(relayId); if (!item) return; for (const server of item.runtime.servers) try { server.close(); } catch {} closeUdpClients(item.runtime.udpClients); relays.delete(relayId); }
+const relayControlAcks = new Map();
+function relayState(rule, runtime) { return { id: rule.id, revision: String(rule.revision || ''), status: runtime.status, lastError: runtime.lastError || '', bytesIn: runtime.bytesIn, bytesOut: runtime.bytesOut, connections: runtime.connections, updatedAt: new Date().toISOString() }; }
+function relayStates() { return [...relays.values()].map(item => relayState(item.rule, item.runtime)).concat([...relayControlAcks.values()]); }
 function createTcp(rule, runtime) {
-  const server = net.createServer(client => { runtime.connections++; const upstream = net.connect({ host: rule.targetHost, port: rule.targetPort }); let closed = false; const close = () => { if (closed) return; closed = true; runtime.connections = Math.max(0, runtime.connections - 1); client.destroy(); upstream.destroy(); }; client.on('data', chunk => { runtime.bytesIn += chunk.length; }); upstream.on('data', chunk => { runtime.bytesOut += chunk.length; }); client.on('error', close); upstream.on('error', error => { runtime.lastError = error.message; close(); }); client.on('close', close); upstream.on('close', close); client.pipe(upstream); upstream.pipe(client); });
+  const server = net.createServer(client => { runtime.connections++; const upstream = net.connect({ host: rule.targetHost, port: rule.targetPort }); let closed = false; runtime.sockets.add(client); runtime.sockets.add(upstream); const close = () => { if (closed) return; closed = true; runtime.connections = Math.max(0, runtime.connections - 1); runtime.sockets.delete(client); runtime.sockets.delete(upstream); client.destroy(); upstream.destroy(); }; client.on('data', chunk => { runtime.bytesIn += chunk.length; }); upstream.on('data', chunk => { runtime.bytesOut += chunk.length; }); client.on('error', close); upstream.on('error', error => { runtime.lastError = error.message; close(); }); client.on('close', close); upstream.on('close', close); client.pipe(upstream); upstream.pipe(client); });
   runtime.servers.push(server); return new Promise((resolve, reject) => { const fail = error => reject(error); server.once('error', fail); server.listen(rule.listenPort, rule.bindAddress, () => { server.removeListener('error', fail); server.on('error', error => { runtime.status = 'error'; runtime.lastError = error.message; }); resolve(); }); });
 }
-function closeUdpClients(clients) {
+function closeUdpClients(clients, runtime) {
+  const count = clients.size;
   for (const entry of clients.values()) { if (entry?.timer) clearTimeout(entry.timer); try { (entry?.socket || entry).close(); } catch {} }
   clients.clear();
+  if (runtime) runtime.connections = Math.max(0, runtime.connections - count);
 }
 function createUdp(rule, runtime) {
   const server = dgram.createSocket('udp4'); runtime.servers.push(server); const clients = runtime.udpClients; const idleMs = 2 * 60 * 1000;
   server.on('message', (message, remote) => {
     runtime.bytesIn += message.length; const key = `${remote.address}:${remote.port}`; let entry = clients.get(key);
     if (!entry) {
-      const socket = dgram.createSocket('udp4'); entry = { socket, timer: null };
-      const closeEntry = () => { if (entry.timer) clearTimeout(entry.timer); if (clients.get(key) === entry) clients.delete(key); try { socket.close(); } catch {} };
+      const socket = dgram.createSocket('udp4'); entry = { socket, timer: null, connected: false, pending: [] };
+      const closeEntry = () => { if (entry.timer) clearTimeout(entry.timer); if (clients.get(key) === entry) { clients.delete(key); runtime.connections = Math.max(0, runtime.connections - 1); } try { socket.close(); } catch {} };
       const refresh = () => { if (entry.timer) clearTimeout(entry.timer); entry.timer = setTimeout(closeEntry, idleMs); entry.timer.unref?.(); };
-      entry.refresh = refresh; socket.on('message', reply => { runtime.bytesOut += reply.length; server.send(reply, remote.port, remote.address); refresh(); }); socket.on('error', error => { runtime.lastError = error.message; closeEntry(); }); clients.set(key, entry);
+      const send = packet => { if (clients.get(key) !== entry) return; socket.send(packet, error => { if (error) { runtime.lastError = error.message; closeEntry(); } }); };
+      entry.refresh = refresh; entry.send = send; socket.on('message', reply => { runtime.bytesOut += reply.length; server.send(reply, remote.port, remote.address, error => { if (error) runtime.lastError = error.message; }); refresh(); }); socket.on('error', error => { runtime.lastError = error.message; closeEntry(); }); clients.set(key, entry); runtime.connections++;
+      try { socket.connect(rule.targetPort, rule.targetHost, () => { if (clients.get(key) !== entry) return; entry.connected = true; const pending = entry.pending.splice(0); for (const packet of pending) send(packet); refresh(); }); }
+      catch (error) { runtime.lastError = error.message; closeEntry(); return; }
     }
-    entry.refresh(); entry.socket.send(message, rule.targetPort, rule.targetHost);
+    entry.refresh();
+    if (entry.connected) entry.send(message);
+    else if (entry.pending.length < 32) entry.pending.push(Buffer.from(message));
+    else runtime.lastError = `UDP session ${key} queued too many packets while connecting to target`;
   });
   return new Promise((resolve, reject) => { const fail = error => reject(error); server.once('error', fail); server.bind(rule.listenPort, rule.bindAddress, () => { server.removeListener('error', fail); server.on('error', error => { runtime.status = 'error'; runtime.lastError = error.message; }); resolve(); }); });
-}async function startRelay(rule) {
-  const runtime = { status: 'starting', lastError: '', bytesIn: 0, bytesOut: 0, connections: 0, servers: [], udpClients: new Map() }; relays.set(rule.id, { rule, runtime, signature: JSON.stringify(rule) });
+}
+function closeRelayServer(server) { return new Promise(resolve => { try { server.close(resolve); } catch { resolve(); } }); }
+async function closeRelayRuntime(runtime) {
+  for (const socket of runtime.sockets) try { socket.destroy(); } catch {}
+  runtime.sockets.clear(); closeUdpClients(runtime.udpClients, runtime);
+  const servers = runtime.servers.splice(0); await Promise.allSettled(servers.map(closeRelayServer)); runtime.connections = 0;
+}
+async function stopRelay(relayId) { const item = relays.get(relayId); if (!item) return; item.runtime.status = 'stopping'; await closeRelayRuntime(item.runtime); if (relays.get(relayId) === item) relays.delete(relayId); }
+async function startRelay(rule) {
+  const runtime = { status: 'starting', lastError: '', bytesIn: 0, bytesOut: 0, connections: 0, servers: [], sockets: new Set(), udpClients: new Map() }; relays.set(rule.id, { rule, runtime, signature: JSON.stringify(rule) });
   try { if (rule.transport === 'tcp' || rule.transport === 'tcp+udp') await createTcp(rule, runtime); if (rule.transport === 'udp' || rule.transport === 'tcp+udp') await createUdp(rule, runtime); runtime.status = 'running'; console.log(`[agent] relay ${rule.name} is running on ${rule.bindAddress}:${rule.listenPort}`); }
-  catch (error) { runtime.status = 'error'; runtime.lastError = error.message; for (const server of runtime.servers) try { server.close(); } catch {} closeUdpClients(runtime.udpClients); console.error(`[agent] relay ${rule.name} failed: ${error.message}`); }
+  catch (error) { await closeRelayRuntime(runtime); runtime.status = 'error'; runtime.lastError = error.message; console.error(`[agent] relay ${rule.name} failed: ${error.message}`); }
 }
 async function syncRelays(tasks) {
-  const wanted = new Map((Array.isArray(tasks) ? tasks : []).filter(rule => Number.isInteger(Number(rule.id)) && rule.targetHost && rule.listenPort && rule.targetPort).map(rule => [Number(rule.id), { ...rule, id: Number(rule.id) }]));
-  for (const [relayId] of relays) if (!wanted.has(relayId)) stopRelay(relayId);
-  for (const [relayId, rule] of wanted) { const existing = relays.get(relayId); const signature = JSON.stringify(rule); if (!existing || existing.signature !== signature || existing.runtime.status === 'error') { if (existing) stopRelay(relayId); await startRelay(rule); } }
+  const received = Array.isArray(tasks) ? tasks : [];
+  const controls = new Map(received.filter(rule => Number.isInteger(Number(rule?.id)) && rule?.tombstone === true && ['stop', 'delete'].includes(rule.action) && rule.revision).map(rule => [Number(rule.id), { id: Number(rule.id), revision: String(rule.revision), action: rule.action }]));
+  const wanted = new Map(received.filter(rule => Number.isInteger(Number(rule.id)) && rule.tombstone !== true && rule.targetHost && rule.listenPort && rule.targetPort).map(rule => [Number(rule.id), { ...rule, id: Number(rule.id) }]));
+  for (const [relayId] of relays) if (!wanted.has(relayId)) await stopRelay(relayId);
+  for (const [relayId, control] of controls) relayControlAcks.set(relayId, { id: relayId, revision: control.revision, status: 'stopped', lastError: '', bytesIn: 0, bytesOut: 0, connections: 0, updatedAt: new Date().toISOString() });
+  for (const relayId of [...relayControlAcks.keys()]) if (!controls.has(relayId)) relayControlAcks.delete(relayId);
+  for (const [relayId, rule] of wanted) { relayControlAcks.delete(relayId); const existing = relays.get(relayId); const signature = JSON.stringify(rule); if (!existing || existing.signature !== signature || existing.runtime.status === 'error') { if (existing) await stopRelay(relayId); await startRelay(rule); } }
 }
 async function heartbeat() {
   const probe = xrayProbe(); const response = await postJson(`${controller}/api/agent/heartbeat`, { id, token, info: { version: AGENT_VERSION, hostname: os.hostname(), platform: `${process.platform} ${os.release()}`, arch: process.arch, nodeVersion: process.version, uptimeSeconds: Math.floor(os.uptime()), memoryTotal: os.totalmem(), memoryFree: os.freemem(), cpus: os.cpus().length, addresses: Object.values(os.networkInterfaces()).flat().filter(item => item && !item.internal && item.address).map(item => item.address), processId: process.pid, agentStartedAt, updateAck: agentState.updateAck || '', updateFailedId: agentState.updateFailedId || '', updateError: agentState.updateError || '', xrayInstallAck: agentState.xrayInstallAck || '', xrayInstallFailedId: agentState.xrayInstallFailedId || '', xrayInstalling: agentState.xrayInstalling === true, xrayInstallError: agentState.xrayInstallError || '', xrayAvailable: probe.available, xrayVersion: probe.version, inboundStates: inboundStates(), relayStates: relayStates() } });
@@ -292,17 +312,17 @@ async function heartbeat() {
 let shuttingDown = false;
 async function shutdown(signal) {
   if (shuttingDown) return; shuttingDown = true; console.log(`[agent] received ${signal}, stopping relay and Xray processes`);
-  for (const relayId of [...relays.keys()]) stopRelay(relayId);
+  await Promise.all([...relays.keys()].map(stopRelay));
   await stopXray(); process.exit(0);
 }
 process.once('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(1)); });
 process.once('SIGINT', () => { shutdown('SIGINT').catch(() => process.exit(1)); });
 (async () => {
-  const handleFailure = error => { if (error.statusCode === 401 || error.statusCode === 403 || error.statusCode === 426) { for (const relayId of [...relays.keys()]) stopRelay(relayId); stopXray().catch(() => {}); console.error(`[agent] authorization was revoked; all relays and Xray stopped: ${error.message}`); return; } console.error(`[agent] heartbeat failed: ${error.message}`); };
+  const handleFailure = async error => { if (error.statusCode === 401 || error.statusCode === 403 || error.statusCode === 426) { await Promise.all([...relays.keys()].map(stopRelay)); await stopXray(); console.error(`[agent] authorization was revoked; all relays and Xray stopped: ${error.message}`); return; } console.error(`[agent] heartbeat failed: ${error.message}`); };
   const run = async () => {
     let interval = 15000;
     try { interval = await heartbeat(); }
-    catch (error) { handleFailure(error); if (once) process.exitCode = 1; }
+    catch (error) { await handleFailure(error); if (once) process.exitCode = 1; }
     if (!once && !shuttingDown) setTimeout(run, interval);
   };
   await run();

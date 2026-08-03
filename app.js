@@ -15,6 +15,8 @@ const inboundTemplates = {
   Shadowsocks: { key: 'ss', name: 'Shadowsocks 2022 模板', desc: 'TCP/UDP SS2022，自动生成服务端 PSK、用户 PSK 和 ss:// 链接。', defaults: { port: '8388', method: '2022-blake3-aes-128-gcm' } }
 };
 let relays = [], inbounds = [], users = [], agents = [], auditEntries = [], filter = 'all', systemInfo = null, traffic = null, editingInboundId = null, editingRelayId = null, editingUserId = null, auditAvailable = false;
+const selectedRelayIds = new Set();
+let agentFilter = 'all', operationsRefreshPromise = null, lastOperationsSyncAt = null, diagnosticsText = '', refreshFailureNotifiedAt = 0, fleetUpdateInProgress = false;
 const agentCardCollapsed = new Set((() => { try { const value = JSON.parse(localStorage.getItem('3xui-agent-collapsed') || '[]'); return Array.isArray(value) ? value : []; } catch { return []; } })());
 const $ = selector => document.querySelector(selector);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, match => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[match]));
@@ -37,11 +39,11 @@ function syncApplicationAccess() {
 function setApplicationLocked(locked) { applicationLocked = locked; syncApplicationAccess(); }
 
 function clearAuthenticatedState() {
-  relays = []; inbounds = []; users = []; agents = []; auditEntries = []; systemInfo = null; traffic = null; editingInboundId = null; editingRelayId = null; editingUserId = null; auditAvailable = false;
-  ['#cards', '#inboundCards', '#userCards', '#agentCards', '#health', '#trafficDays', '#trafficInbounds', '#trafficUsers', '#trafficLog', '#auditLog', '#securityChecks', '#agentDetailsBody', '#agentCommand', '#toastStack'].forEach(selector => $(selector)?.replaceChildren());
+  relays = []; inbounds = []; users = []; agents = []; auditEntries = []; systemInfo = null; traffic = null; editingInboundId = null; editingRelayId = null; editingUserId = null; auditAvailable = false; selectedRelayIds.clear(); lastOperationsSyncAt = null;
+  ['#cards', '#inboundCards', '#userCards', '#agentCards', '#health', '#trafficDays', '#trafficInbounds', '#trafficUsers', '#trafficLog', '#auditLog', '#securityChecks', '#agentDetailsBody', '#agentCommand', '#toastStack', '#diagnosticsBody'].forEach(selector => $(selector)?.replaceChildren());
   $('#overviewChart').innerHTML = '<p class="empty-state">暂无流量数据。</p>';
   $('#inboundCount').innerHTML = '0 <small>在线 / 0 已启用 · 共 0</small>'; $('#activeCount').textContent = '0'; $('#userCount').textContent = '0';
-  $('#agentOnlineCount').textContent = '0'; $('#agentTotalCount').textContent = '0';
+  ['#agentOnlineCount', '#agentOfflineCount', '#agentIssueCount', '#agentResourceCount', '#relayTotalCount', '#relayRunningCount', '#relayIssueCount', '#relayConnectionCount'].forEach(selector => { const target = $(selector); if (target) target.textContent = '0'; }); $('#agentOnlineRate').textContent = '在线率 0%'; $('#relayAvailability').textContent = '可用率 0%'; $('#relayTrafficTotal').textContent = '累计 0 B'; setOperationsSync('', '等待同步'); updateRelayBatchBar();
   $('#overviewTraffic').innerHTML = '0 <small>GB</small>'; $('#overviewTrafficNote').textContent = '暂无流量记录';
   $('#trafficTotal').innerHTML = '0 <small>GB</small>'; $('#trafficRecorded').innerHTML = '0 <small>GB</small>'; $('#trafficActive').textContent = '0'; $('#trafficRecords').textContent = '0';
   $('#adminName').textContent = '-'; $('#tlsSummary').textContent = '登录后读取证书状态。'; $('#securitySummary').textContent = '登录后评估面板安全状态。'; $('#securityGrade').textContent = '--'; $('#securityGrade').className = 'security-grade';
@@ -97,26 +99,105 @@ function formatBytes(value) {
 }
 function relayState(relay) { return relay.runtimeStatus || relay.status || 'stopped'; }
 function inboundDesiredState(inbound) { return inbound.desiredStatus || inbound.status || 'stopped'; }
-function renderRelays() {
-  const search = $('#search').value.toLowerCase();
-  const list = relays.filter(relay => { const state = relayState(relay); return (filter === 'all' || state === filter) && Object.values(relay).join(' ').toLowerCase().includes(search); });
-  $('#cards').innerHTML = list.length ? list.map(relay => {
-    const state = relayState(relay), desired = relay.status || 'stopped'; const listen = relay.listenPort ? `${relay.bindAddress || '0.0.0.0'}:${relay.listenPort}` : '旧版档案'; const target = relay.targetHost ? `${relay.targetHost}:${relay.targetPort}` : (relay.exit || '需补充目标地址');
-    const stateText = state === 'running' ? zh.run : state === 'error' ? '异常' : state === 'legacy' ? '需迁移' : state === 'starting' ? '下发中' : state === 'offline' ? 'Agent 离线' : state === 'disabled' ? 'Agent 停用' : zh.stop;
-    const detail = ['error', 'legacy', 'offline', 'disabled'].includes(state) ? (relay.lastError || '规则尚未运行') : `连接 ${Number(relay.connections || 0)} · ↑${formatBytes(relay.bytesIn)} ↓${formatBytes(relay.bytesOut)}`;
-    const executor = relay.agentId ? `Agent · ${relay.agentName || relay.agentId}` : '本机面板'; const controls = state === 'legacy' ? `<button class="btn danger" onclick="deleteRelay(${relay.id})">${zh.del}</button>` : `<button class="btn" onclick="editRelay(${relay.id})">编辑</button> <button class="btn" onclick="diagnoseRelay(${relay.id})">诊断</button> <button class="btn" onclick="toggleRelay(${relay.id})">${desired === 'running' ? zh.pause : zh.enable}</button> <button class="btn danger" onclick="deleteRelay(${relay.id})">${zh.del}</button>`;
-    return `<article class="relay-card relay-${esc(state)}"><div class="name"><b>⇄</b><strong>${esc(relay.name)}</strong><small>${esc(String(relay.transport || 'tcp').toUpperCase())} · ${esc(executor)}</small></div><div class="route"><b>${esc(listen)}</b><i></i><span>${esc(target)}</span><small>${esc(relay.entry || '入口端口')} · ${esc(executor)} → ${esc(relay.exit || '目标服务')}</small></div><div class="status ${esc(state)}">${stateText}<br><small title="${esc(relay.lastError || '')}">${esc(detail)}</small></div><div class="relay-actions">${controls}</div></article>`;
-  }).join('') : `<article>${zh.emptyRelay}</article>`;
-  $('#activeCount').textContent = relays.filter(relay => relayState(relay) === 'running').length;
-  $('#health').innerHTML = relays.map(relay => { const state = relayState(relay), listen = relay.listenPort ? `${relay.bindAddress || '0.0.0.0'}:${relay.listenPort}` : '需迁移', target = relay.targetHost ? `${relay.targetHost}:${relay.targetPort}` : (relay.exit || '旧版档案'); return `<div class="healthrow"><i class="${state === 'running' ? '' : 'off'}"></i><div><strong>${esc(relay.name)}</strong><br><small>${esc(listen)} → ${esc(target)}</small></div><small>${state === 'running' ? `↑${formatBytes(relay.bytesIn)} ↓${formatBytes(relay.bytesOut)}` : esc(relay.lastError || state)}</small></div>`; }).join('');
+function relayNeedsAttention(relay) { return ['error', 'offline', 'disabled', 'starting', 'stopping', 'legacy'].includes(relayState(relay)); }
+function relayStateText(state, relay = null) {
+  return state === 'running' ? '运行中' : state === 'error' ? '异常' : state === 'legacy' ? '需迁移' : state === 'starting' ? '等待 Agent' : state === 'stopping' ? (relay?.pendingRemoteAction === 'delete' ? '等待删除确认' : '等待停止确认') : state === 'offline' ? 'Agent 离线' : state === 'disabled' ? 'Agent 停用' : '已暂停';
 }
-function populateRelayAgents() {
+function formatRelativeTime(value) {
+  const time = Date.parse(value || ''); if (!Number.isFinite(time)) return '从未同步';
+  const seconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+  if (seconds < 10) return '刚刚'; if (seconds < 60) return `${seconds} 秒前`; const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟前`; const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`; return `${Math.floor(hours / 24)} 天前`;
+}
+function setOperationsSync(state, message = '') {
+  const fallback = lastOperationsSyncAt ? `已同步 ${lastOperationsSyncAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : '等待同步';
+  ['#relaySyncState', '#agentSyncState'].forEach(selector => { const target = $(selector); if (!target) return; target.className = `sync-state ${state}`; target.textContent = message || fallback; });
+}
+function renderRelayExecutorFilter() {
+  const select = $('#relayExecutorFilter'); if (!select) return; const previous = select.value || 'all';
+  select.innerHTML = '<option value="all">全部节点</option><option value="local">本机面板</option>' + agents.map(agent => `<option value="${esc(agent.id)}">${esc(agent.name)} · ${agent.status === 'online' ? '在线' : agent.status === 'disabled' ? '停用' : '离线'}</option>`).join('');
+  select.value = [...select.options].some(option => option.value === previous) ? previous : 'all';
+}
+function updateRelayBatchBar() {
+  const bar = $('#relayBatchBar'); if (!bar) return; const count = selectedRelayIds.size;
+  bar.hidden = count === 0; $('#relaySelectedCount').textContent = `已选择 ${count} 条`;
+}
+window.selectRelay = (id, checked) => {
+  if (checked) selectedRelayIds.add(Number(id)); else selectedRelayIds.delete(Number(id));
+  const card = document.querySelector(`.relay-card[data-relay-id="${Number(id)}"]`); card?.classList.toggle('selected', checked); updateRelayBatchBar();
+};
+function renderRelays() {
+  renderRelayExecutorFilter();
+  const search = ($('#search')?.value || '').trim().toLowerCase(); const executor = $('#relayExecutorFilter')?.value || 'all';
+  const selectable = new Set(relays.filter(relay => relayState(relay) !== 'stopping').map(relay => Number(relay.id))); [...selectedRelayIds].forEach(id => { if (!selectable.has(id)) selectedRelayIds.delete(id); });
+  const list = relays.filter(relay => {
+    const state = relayState(relay); const stateMatch = filter === 'all' || (filter === 'error' ? relayNeedsAttention(relay) : state === filter);
+    const executorMatch = executor === 'all' || (executor === 'local' ? !relay.agentId : relay.agentId === executor);
+    const haystack = [relay.name, relay.listenPort, relay.bindAddress, relay.targetHost, relay.targetPort, relay.entry, relay.exit, relay.agentName, relay.agentId, relay.transport].join(' ').toLowerCase();
+    return stateMatch && executorMatch && (!search || haystack.includes(search));
+  });
+  const running = relays.filter(relay => relayState(relay) === 'running').length; const issues = relays.filter(relayNeedsAttention).length;
+  const connections = relays.reduce((sum, relay) => sum + Math.max(0, Number(relay.connections || 0)), 0); const trafficTotal = relays.reduce((sum, relay) => sum + Math.max(0, Number(relay.bytesIn || 0)) + Math.max(0, Number(relay.bytesOut || 0)), 0);
+  $('#relayTotalCount').textContent = relays.length; $('#relayRunningCount').textContent = running; $('#relayIssueCount').textContent = issues; $('#relayConnectionCount').textContent = connections;
+  $('#relayAvailability').textContent = `可用率 ${relays.length ? Math.round(running / relays.length * 100) : 0}%`; $('#relayTrafficTotal').textContent = `累计 ${formatBytes(trafficTotal)}`;
+  $('#cards').innerHTML = list.length ? list.map(relay => {
+    const state = relayState(relay), desired = relay.status || 'stopped', selected = selectedRelayIds.has(Number(relay.id)); const listen = relay.listenPort ? `${relay.bindAddress || '0.0.0.0'}:${relay.listenPort}` : '旧版档案'; const target = relay.targetHost ? `${relay.targetHost}:${relay.targetPort}` : (relay.exit || '需补充目标地址');
+    const executor = relay.agentId ? `Agent · ${relay.agentName || relay.agentId}` : '本机面板'; const errorState = relayNeedsAttention(relay); const detail = errorState ? (relay.lastError || (state === 'starting' ? '等待 Agent 应用当前配置' : state === 'stopping' ? '等待 Agent 确认远程规则已停止' : '规则尚未运行')) : `连接 ${Number(relay.connections || 0)} · ↑${formatBytes(relay.bytesIn)} ↓${formatBytes(relay.bytesOut)}`;
+    const controls = state === 'legacy' ? `<button class="btn danger" onclick="deleteRelay(${relay.id})">删除</button>` : state === 'stopping' ? `<button class="btn" onclick="diagnoseRelay(${relay.id})">诊断</button><button class="btn" disabled>等待确认</button><button class="btn danger" title="等待 Agent 确认" aria-label="等待确认 ${esc(relay.name)}" disabled>×</button>` : `<button class="btn" onclick="editRelay(${relay.id})">编辑</button><button class="btn" onclick="diagnoseRelay(${relay.id})">诊断</button><button class="btn primary-action" onclick="toggleRelay(${relay.id})" ${state === 'starting' ? 'disabled' : ''}>${desired === 'running' ? '暂停' : '启用'}</button><button class="btn danger" title="删除规则" aria-label="删除 ${esc(relay.name)}" onclick="deleteRelay(${relay.id})">×</button>`;
+    return `<article class="relay-card relay-${esc(state)} ${selected ? 'selected' : ''}" data-relay-id="${relay.id}"><label class="relay-select" title="${state === 'stopping' ? '等待 Agent 确认期间不可批量操作' : `选择 ${esc(relay.name)}`}"><input type="checkbox" ${selected ? 'checked' : ''} ${state === 'stopping' ? 'disabled' : ''} aria-label="选择 ${esc(relay.name)}" onchange="selectRelay(${relay.id}, this.checked)"><span></span></label><div class="relay-main"><div class="name"><b>⇄</b><div><strong title="${esc(relay.name)}">${esc(relay.name)}</strong><small>${esc(executor)}</small></div></div><div class="relay-tags"><span class="relay-tag">${esc(String(relay.transport || 'tcp').toUpperCase())}</span><span class="relay-tag">${desired === 'running' ? '期望运行' : '期望暂停'}</span></div></div><div class="route"><b title="${esc(listen)}">${esc(listen)}</b><i></i><span title="${esc(target)}">${esc(target)}</span><small>${esc(relay.entry || '入口端口')} → ${esc(relay.exit || '目标服务')}</small></div><div class="relay-health"><span class="state-pill ${esc(state)}">${relayStateText(state, relay)}</span><small class="${errorState ? 'error-copy' : ''}" title="${esc(detail)}">${esc(detail)}</small></div><div class="relay-actions">${controls}</div></article>`;
+  }).join('') : `<article class="empty-operation"><b>⇄</b><strong>${relays.length ? '没有符合筛选条件的线路' : '还没有中转线路'}</strong><p>${relays.length ? '调整搜索关键词、节点或状态筛选后重试。' : '创建第一条规则后即可在这里查看实时状态、连接和流量。'}</p>${relays.length ? '' : '<button class="primary" type="button" onclick="document.querySelector(\'#newRelay\').click()">新建中转</button>'}</article>`;
+  $('#activeCount').textContent = running; updateRelayBatchBar();
+  const overview = [...relays].sort((a, b) => Number(relayNeedsAttention(b)) - Number(relayNeedsAttention(a))).slice(0, 6);
+  $('#health').innerHTML = overview.length ? overview.map(relay => { const state = relayState(relay), listen = relay.listenPort ? `${relay.bindAddress || '0.0.0.0'}:${relay.listenPort}` : '需迁移', target = relay.targetHost ? `${relay.targetHost}:${relay.targetPort}` : (relay.exit || '旧版档案'); return `<div class="healthrow"><i class="${state === 'running' ? '' : 'off'}"></i><div><strong>${esc(relay.name)}</strong><br><small>${esc(listen)} → ${esc(target)}</small></div><small>${state === 'running' ? `↑${formatBytes(relay.bytesIn)} ↓${formatBytes(relay.bytesOut)}` : esc(relayStateText(state, relay))}</small></div>`; }).join('') : '<p class="empty-state">暂无中转线路。</p>';
+}
+function populateRelayAgents(selected = '') {
   const select = $('#relayAgent'); if (!select) return;
-  select.innerHTML = '<option value="">本机面板</option>' + agents.filter(agent => agent.status !== 'disabled').map(agent => `<option value="${esc(agent.id)}">${esc(agent.name)} · ${agent.status === 'online' ? '在线' : '离线'}</option>`).join('');
-}function renderAgents() {
-  const online = agents.filter(agent => agent.status === 'online').length; $('#agentOnlineCount').textContent = online; $('#agentTotalCount').textContent = agents.length;
-  $('#agentCards').innerHTML = agents.length ? agents.map(agent => { const status = agent.status || 'offline'; const system = [agent.hostname, agent.platform, agent.arch].filter(Boolean).join(' · ') || '尚未收到心跳'; const seen = agent.lastSeenAt ? new Date(agent.lastSeenAt).toLocaleString('zh-CN') : '从未连接'; const stateText = status === 'online' ? '在线' : status === 'disabled' ? '已停用' : '离线'; const relayCount = (agent.relayStates || []).filter(item => item.status === 'running').length; const inboundCount = (agent.inboundStates || []).filter(item => item.status === 'running').length; const updateText = agent.updatePending ? ' · 更新下发中' : agent.updateError ? ' · 更新失败' : ''; const xrayText = agent.xrayInstallPending ? 'Xray 安装下发中' : agent.xrayInstalling ? 'Xray 安装中' : agent.xrayInstallError ? 'Xray 安装失败' : agent.xrayAvailable ? agent.xrayVersion || 'Xray 可用' : 'Xray 未检测到'; const controllerText = agent.controllerSecure === false ? ' · 控制链路不安全' : ''; const warningText = agent.updateError || agent.xrayInstallError || (agent.controllerSecure === false ? '远程 Agent 控制地址必须迁移到 HTTPS' : ''); const memory = agent.memoryTotal ? `${formatBytes(agent.memoryTotal - Number(agent.memoryFree || 0))} / ${formatBytes(agent.memoryTotal)}` : '-'; const ips = (agent.addresses || []).join(', ') || '-'; const collapsed = agentCardCollapsed.has(agent.id); return `<article class="agent-card ${collapsed ? 'collapsed' : ''}"><div class="agent-title"><b>◉</b><div><strong>${esc(agent.name)}</strong><small>${esc(agent.id)}</small></div></div><div class="agent-system"><strong>${esc(system)}</strong><small class="${warningText ? 'agent-warning' : ''}" title="${esc(warningText)}">${esc(xrayText)}${updateText}${controllerText}</small></div><div class="status ${esc(status)}">${stateText}<br><small>${esc(seen)}</small></div><div class="agent-summary-actions"><button class="btn" onclick="toggleAgentCard('${esc(agent.id)}')">${collapsed ? '展开详情' : '收起详情'}</button><button class="btn" onclick="configureAgentInbound('${esc(agent.id)}')">配置节点</button><button class="btn" onclick="showAgentDetails('${esc(agent.id)}')">完整详情</button></div><div class="agent-expanded"><div class="agent-quick"><div><small>公网 / 网卡地址</small><strong title="${esc(ips)}">${esc(ips)}</strong></div><div><small>CPU / 内存</small><strong>${esc(agent.cpus || '-')} 核 · ${esc(memory)}</strong></div><div><small>Xray Core</small><strong title="${esc(agent.xrayInstallError || '')}">${esc(xrayText)}</strong></div><div><small>运行版本</small><strong>Agent ${esc(agent.version || '-')} · Node ${esc(agent.nodeVersion || '-')}</strong></div><div><small>进程 / 启动</small><strong>PID ${esc(agent.processId || '-')} · ${esc(agent.agentStartedAt ? new Date(agent.agentStartedAt).toLocaleString('zh-CN') : '-')}</strong></div><div><small>已接管资源</small><strong>节点 ${inboundCount} · 中转 ${relayCount}</strong></div></div><div class="agent-actions"><button class="btn" onclick="requestAgentXrayInstall('${esc(agent.id)}')" ${agent.xrayInstallPending ? 'disabled' : ''}>安装 Xray</button><button class="btn" onclick="editAgentController('${esc(agent.id)}')">修改面板地址</button><button class="btn" onclick="showAgentBootstrap('${esc(agent.id)}')">部署 / 更新</button><button class="btn" onclick="requestAgentUpdate('${esc(agent.id)}')" ${agent.updatePending ? 'disabled' : ''}>一键更新</button><button class="btn" onclick="toggleAgent('${esc(agent.id)}')">${status === 'disabled' ? '启用' : '停用'}</button><button class="btn" onclick="rotateAgentToken('${esc(agent.id)}')">轮换令牌</button><button class="btn danger" onclick="deleteAgent('${esc(agent.id)}')">${zh.del}</button></div></div></article>`; }).join('') : '<article class="empty-state">尚未登记 Agent。添加机器后复制启动命令到目标 VPS。</article>';
-}function showDeployment(deployment, title = '部署 Agent') {
+  const selectedId = String(selected || ''); const current = agents.find(agent => agent.id === selectedId);
+  const options = agents.filter(agent => agent.status !== 'disabled' || agent.id === selectedId).map(agent => `<option value="${esc(agent.id)}">${esc(agent.name)} · ${agent.status === 'online' ? '在线' : agent.status === 'disabled' ? '已停用（当前绑定）' : '离线'}</option>`).join('');
+  const missing = selectedId && !current ? `<option value="${esc(selectedId)}">未知 Agent ${esc(selectedId)} · 当前绑定</option>` : '';
+  select.innerHTML = '<option value="">本机面板</option>' + missing + options; select.value = selectedId;
+  select.dataset.initialAgentId = selectedId; select.dataset.initialAgentDisabled = String(Boolean(selectedId && (!current || current.status === 'disabled')));
+}
+function agentDisablePending(agent) { return agent?.status === 'disabled' && !agent.disabledAckAt; }
+function agentStateText(agent) { return agentDisablePending(agent) ? '停用确认中' : agent?.status === 'online' ? '在线' : agent?.status === 'disabled' ? '已停用' : '离线'; }
+function inboundStateText(state) { return state === 'running' ? '运行中' : state === 'starting' ? '下发中' : state === 'stopping' ? '停用确认中' : state === 'error' ? '异常' : state === 'offline' ? 'Agent 离线' : state === 'disabled' ? 'Agent 已停用' : '已暂停'; }
+function desiredStateText(state) { return state === 'running' ? '运行' : '暂停'; }
+function agentHasIssue(agent) {
+  return agentDisablePending(agent) || agent.controllerSecure === false || Boolean(agent.updateError || agent.xrayInstallError) || (agent.status === 'online' && !agent.xrayAvailable);
+}
+function agentMaintenanceActive(agent) { return Boolean(agent?.updatePending || agent?.xrayInstallPending || agent?.xrayInstalling); }
+function renderAgents() {
+  const search = ($('#agentSearch')?.value || '').trim().toLowerCase(); const statusFilter = $('#agentStatusFilter')?.value || agentFilter || 'all';
+  const online = agents.filter(agent => agent.status === 'online').length; const offline = agents.filter(agent => agent.status !== 'online').length; const issues = agents.filter(agentHasIssue).length;
+  const resources = agents.reduce((sum, agent) => sum + inbounds.filter(item => item.agentId === agent.id).length + relays.filter(item => item.agentId === agent.id).length, 0);
+  $('#agentOnlineCount').textContent = online; $('#agentOfflineCount').textContent = offline; $('#agentIssueCount').textContent = issues; $('#agentResourceCount').textContent = resources; $('#agentOnlineRate').textContent = `在线率 ${agents.length ? Math.round(online / agents.length * 100) : 0}%`;
+  const eligibleUpdates = agents.filter(agent => agent.status === 'online' && !agentMaintenanceActive(agent));
+  if (!fleetUpdateInProgress) { $('#updateOnlineAgents').disabled = eligibleUpdates.length === 0; $('#updateOnlineAgents').textContent = eligibleUpdates.length ? `更新在线 Agent（${eligibleUpdates.length}）` : '更新在线 Agent'; }
+  const list = agents.filter(agent => {
+    const issue = agentHasIssue(agent), operationalStatus = agentDisablePending(agent) ? 'stopping' : agent.status; const stateMatch = statusFilter === 'all' || (statusFilter === 'issue' ? issue : operationalStatus === statusFilter);
+    const haystack = [agent.name, agent.id, agent.hostname, agent.platform, agent.arch, ...(agent.addresses || [])].join(' ').toLowerCase();
+    return stateMatch && (!search || haystack.includes(search));
+  });
+  $('#agentCards').innerHTML = list.length ? list.map(agent => {
+    const status = agent.status || 'offline', disablePending = agentDisablePending(agent), stateText = agentStateText(agent); const freshness = formatRelativeTime(agent.lastSeenAt);
+    const memoryUsed = Math.max(0, Number(agent.memoryTotal || 0) - Number(agent.memoryFree || 0)); const memoryPercent = agent.memoryTotal ? Math.min(100, Math.round(memoryUsed / Number(agent.memoryTotal) * 100)) : 0;
+    const assignedInbounds = inbounds.filter(item => item.agentId === agent.id), assignedRelays = relays.filter(item => item.agentId === agent.id); const runningInbounds = assignedInbounds.filter(item => item.status === 'running').length; const runningRelays = assignedRelays.filter(item => relayState(item) === 'running').length;
+    const system = [agent.hostname, agent.platform, agent.arch].filter(Boolean).join(' · ') || '等待首次心跳'; const ips = (agent.addresses || []).join(', ') || '尚未上报地址'; const xrayText = agent.xrayInstallPending ? '安装任务排队中' : agent.xrayInstalling ? '正在安装 Xray' : agent.xrayAvailable ? agent.xrayVersion || 'Xray 可用' : '未检测到 Xray';
+    const warning = disablePending ? (agent.safeStopAckCapable === false ? '当前 Agent 版本无法可信确认存量连接已关闭；请打开部署命令升级至 v0.5.7 或更高版本。' : agent.xrayInstalling ? '停用请求已记录；Agent 最后上报仍在安装 Xray，等待其停止全部工作负载并确认。' : '等待 Agent 下次心跳停止全部工作负载并确认。') : agent.controllerSecure === false ? '控制链路不安全，请立即迁移到 HTTPS。' : agent.updateError ? `Agent 更新失败：${agent.updateError}` : agent.xrayInstallError ? `Xray 安装失败：${agent.xrayInstallError}` : status === 'offline' ? '节点已离线；以下指标来自最后一次心跳。' : status === 'disabled' ? '节点已停用，不再接收配置和任务。' : !agent.xrayAvailable ? '未检测到 Xray Core，远程入站无法运行。' : '';
+    const pending = agentMaintenanceActive(agent); const alertText = disablePending ? warning : pending ? (agent.updatePending ? 'Agent 更新任务已下发，等待节点执行并确认。' : xrayText) : warning;
+    const onlineActionsDisabled = status !== 'online'; const safeId = esc(agent.id), actionId = esc(JSON.stringify(String(agent.id)));
+    const configurationDisabled = status === 'disabled';
+    return `<article class="agent-card ${status !== 'online' ? 'agent-stale' : ''}"><div class="agent-card-head"><div class="agent-title"><b>◉</b><div><strong title="${esc(agent.name)}">${esc(agent.name)}</strong><small>${safeId}</small></div></div><div class="agent-head-status"><span class="state-pill ${disablePending ? 'stopping' : esc(status)}">${stateText}</span><small title="${esc(agent.lastSeenAt || '')}">${esc(freshness)}</small></div></div><div class="agent-health-strip"><div class="agent-health-cell"><small>主机 / 系统</small><strong title="${esc(system)}">${esc(system)}</strong><small title="${esc(ips)}">${esc(ips)}</small></div><div class="agent-health-cell"><small>内存 / CPU</small><strong>${agent.memoryTotal ? `${formatBytes(memoryUsed)} / ${formatBytes(agent.memoryTotal)}` : '-'} · ${Number(agent.cpus || 0) || '-'} 核</strong><div class="mini-meter"><i style="width:${memoryPercent}%"></i></div></div><div class="agent-health-cell"><small>版本 / 承载</small><strong>Agent ${esc(agent.version || '-')} · Node ${esc(agent.nodeVersion || '-')}</strong><small>${esc(xrayText)} · 入站 ${runningInbounds}/${assignedInbounds.length} · 中转 ${runningRelays}/${assignedRelays.length}</small></div></div>${alertText ? `<div class="agent-alert ${pending || disablePending ? 'pending' : ''}">${esc(alertText)}</div>` : ''}<div class="agent-card-actions"><button class="btn primary-action" onclick="configureAgentInbound(${actionId})" ${configurationDisabled ? 'disabled title="请先启用 Agent"' : ''}>配置入站</button><button class="btn" onclick="configureAgentRelay(${actionId})" ${configurationDisabled ? 'disabled title="请先启用 Agent"' : ''}>新建中转</button><button class="btn" onclick="showAgentDetails(${actionId})">查看详情</button><details class="agent-more"><summary>更多操作 ···</summary><div class="agent-more-menu"><button onclick="editAgent(${actionId})">编辑机器信息</button><button onclick="showAgentBootstrap(${actionId})">查看部署命令</button><button onclick="requestAgentUpdate(${actionId})" ${onlineActionsDisabled || pending ? 'disabled' : ''}>一键更新 Agent</button><button onclick="requestAgentXrayInstall(${actionId})" ${onlineActionsDisabled || pending ? 'disabled' : ''}>安装 / 更新 Xray</button><button onclick="toggleAgent(${actionId})">${disablePending ? '取消停用并启用' : status === 'disabled' ? '启用 Agent' : '停用 Agent'}</button><button onclick="rotateAgentToken(${actionId})">轮换访问令牌</button><button class="danger" onclick="deleteAgent(${actionId})">删除 Agent</button></div></details></div></article>`;
+  }).join('') : `<article class="empty-operation"><b>◉</b><strong>${agents.length ? '没有符合筛选条件的 Agent' : '还没有边缘 Agent'}</strong><p>${agents.length ? '调整搜索关键词或状态筛选后重试。' : '添加第一台机器后即可集中查看健康、版本和承载资源。'}</p>${agents.length ? '' : '<button class="primary" type="button" onclick="document.querySelector(\'#newAgent\').click()">添加 Agent</button>'}</article>`;
+  document.querySelectorAll('#agentCards .agent-more').forEach(details => details.addEventListener('toggle', () => positionAgentMenu(details)));
+}
+function positionAgentMenu(details) {
+  const menu = details.querySelector('.agent-more-menu'); if (!menu) return;
+  if (!details.open) { details.classList.remove('open-up'); menu.style.maxHeight = ''; return; }
+  requestAnimationFrame(() => { const trigger = details.querySelector('summary')?.getBoundingClientRect(); if (!trigger) return; const below = Math.max(0, innerHeight - trigger.bottom - 12), above = Math.max(0, trigger.top - 12), openUp = below < Math.min(menu.scrollHeight, 260) && above > below; details.classList.toggle('open-up', openUp); menu.style.maxHeight = `${Math.max(80, Math.floor(openUp ? above : below))}px`; });
+}
+function showDeployment(deployment, title = '部署 Agent') {
   if (!deployment?.command) return;
   $('#agentBootstrapTitle').textContent = title; $('#agentCommand').textContent = deployment.command; openDialog($('#agentBootstrapModal'), '#copyAgentCommand');
 }function resetImportedInboundEditor() {
@@ -133,10 +214,14 @@ function populateRelayAgents() {
 }
 function populateInboundAgents(selected = '') {
   const select = $('#inboundAgent'); if (!select) return;
-  select.innerHTML = '<option value="">本机面板 Xray</option>' + agents.filter(agent => agent.status !== 'disabled').map(agent => `<option value="${esc(agent.id)}">${esc(agent.name)} · ${agent.xrayAvailable ? 'Xray 可用' : '缺少 Xray'}</option>`).join(''); select.value = selected;
+  const selectedId = String(selected || ''); const current = agents.find(agent => agent.id === selectedId);
+  const options = agents.filter(agent => agent.status !== 'disabled' || agent.id === selectedId).map(agent => `<option value="${esc(agent.id)}">${esc(agent.name)} · ${agent.status === 'disabled' ? '已停用（当前绑定）' : agent.xrayAvailable ? 'Xray 可用' : '缺少 Xray'}</option>`).join('');
+  const missing = selectedId && !current ? `<option value="${esc(selectedId)}">未知 Agent ${esc(selectedId)} · 当前绑定</option>` : '';
+  select.innerHTML = '<option value="">本机面板 Xray</option>' + missing + options; select.value = selectedId;
+  select.dataset.initialAgentId = selectedId; select.dataset.initialAgentDisabled = String(Boolean(selectedId && (!current || current.status === 'disabled')));
 }
 function renderInbounds() {
-  $('#inboundCards').innerHTML = inbounds.length ? inbounds.map(inbound => { const state = inbound.status || 'stopped', desired = inboundDesiredState(inbound); const stateText = state === 'running' ? zh.run : state === 'starting' ? '下发中' : state === 'error' ? '异常' : state === 'offline' ? 'Agent 离线' : zh.stop; const executor = inbound.agentId ? `Agent · ${inbound.agentName || inbound.agentId}` : '本机 Xray'; return `<article class="node-card"><div class="inbound-title"><b>◈</b><div><strong>${esc(inbound.name)}</strong><small>${esc(inbound.template || inbound.protocol || inbound.protocolCode)} · ${esc(executor)}</small></div></div><div class="inbound-meta"><b>${zh.listen}</b>${esc(inbound.port)}</div><div class="inbound-meta"><b>${zh.server}</b>${esc(inbound.serverAddress || '-')}</div><div class="status ${esc(state)}">${stateText}<br><small title="${esc(inbound.lastError || '')}">${esc(inbound.lastError || `${zh.security}: ${inbound.security}`)}</small></div><div class="node-link wide"><b>${zh.link}</b><code>${esc(inbound.shareLink || '')}</code></div><div class="inbound-meta wide"><b>${zh.remark}</b>${esc(inbound.remark || zh.noRemark)}</div><details class="node-json wide"><summary>Xray JSON</summary><pre>${esc(JSON.stringify(inbound.xray || {}, null, 2))}</pre></details><div class="inbound-actions wide"><button class="btn" onclick="editInbound(${inbound.id})">编辑</button><button class="btn" onclick="showInboundQr(${inbound.id})">二维码</button><button class="btn" onclick="diagnoseInbound(${inbound.id})">修复并诊断</button><button class="btn" onclick="copyInbound(${inbound.id}, 'shareLink')">${zh.copyLink}</button><button class="btn" onclick="copyInbound(${inbound.id}, 'xray')">${zh.copyJson}</button><button class="btn" onclick="toggleInbound(${inbound.id})">${desired === 'running' ? zh.pause : zh.enable}</button><button class="btn danger" onclick="deleteInbound(${inbound.id})">${zh.del}</button></div></article>`; }).join('') : `<article>${zh.emptyInbound}</article>`;
+  $('#inboundCards').innerHTML = inbounds.length ? inbounds.map(inbound => { const state = inbound.status || 'stopped', desired = inboundDesiredState(inbound); const stateText = inboundStateText(state); const executor = inbound.agentId ? `Agent · ${inbound.agentName || inbound.agentId}` : '本机 Xray'; return `<article class="node-card"><div class="inbound-title"><b>◈</b><div><strong>${esc(inbound.name)}</strong><small>${esc(inbound.template || inbound.protocol || inbound.protocolCode)} · ${esc(executor)}</small></div></div><div class="inbound-meta"><b>${zh.listen}</b>${esc(inbound.port)}</div><div class="inbound-meta"><b>${zh.server}</b>${esc(inbound.serverAddress || '-')}</div><div class="status ${esc(state)}">${stateText}<br><small title="${esc(inbound.lastError || '')}">${esc(inbound.lastError || `${zh.security}: ${inbound.security}`)}</small></div><div class="node-link wide"><b>${zh.link}</b><code>${esc(inbound.shareLink || '')}</code></div><div class="inbound-meta wide"><b>${zh.remark}</b>${esc(inbound.remark || zh.noRemark)}</div><details class="node-json wide"><summary>Xray JSON</summary><pre>${esc(JSON.stringify(inbound.xray || {}, null, 2))}</pre></details><div class="inbound-actions wide"><button class="btn" onclick="editInbound(${inbound.id})">编辑</button><button class="btn" onclick="showInboundQr(${inbound.id})">二维码</button><button class="btn" onclick="diagnoseInbound(${inbound.id})">修复并诊断</button><button class="btn" onclick="copyInbound(${inbound.id}, 'shareLink')">${zh.copyLink}</button><button class="btn" onclick="copyInbound(${inbound.id}, 'xray')">${zh.copyJson}</button><button class="btn" onclick="toggleInbound(${inbound.id})">${desired === 'running' ? zh.pause : zh.enable}</button><button class="btn danger" onclick="deleteInbound(${inbound.id})">${zh.del}</button></div></article>`; }).join('') : `<article>${zh.emptyInbound}</article>`;
   const running = inbounds.filter(inbound => inbound.status === 'running').length, enabled = inbounds.filter(inbound => inboundDesiredState(inbound) === 'running').length; $('#inboundCount').innerHTML = `${running} <small>在线 / ${enabled} 已启用 · 共 ${inbounds.length}</small>`;
 }function populateUserInbounds() {
   const select = $('#userInbound');
@@ -205,27 +290,57 @@ function renderAudit() {
   $('#startRuntime').disabled = !runtime.available || runtime.running; $('#startRuntime').title = runtime.enabledInbounds ? '' : '当前没有启用的入站；仍可先启动 Core，新增入站后会自动重载。'; $('#stopRuntime').disabled = !runtime.running;
 }
 async function load() {
-  const [coreResults, optionalResults] = await Promise.all([
-    Promise.allSettled([api('/api/relays'), api('/api/inbounds'), api('/api/users'), api('/api/agents'), api('/api/traffic')]),
-    Promise.allSettled([api('/api/system'), api('/api/system/audit')])
-  ]);
-  if ([...coreResults, ...optionalResults].some(result => result.status === 'rejected' && result.reason?.status === 401)) return;
-  const coreFailure = coreResults.find(result => result.status === 'rejected');
-  if (coreFailure) {
-    console.error(coreFailure.reason); $('#cards').innerHTML = `<article>${zh.apiFailed}</article>`; $('#inboundCards').innerHTML = `<article>${zh.apiFailed}</article>`; $('#userCards').innerHTML = `<article>${zh.apiFailed}</article>`; $('#agentCards').innerHTML = `<article class="empty-state">${zh.apiFailed}</article>`;
-    return;
-  }
-  const [relayData, inboundData, userData, agentData, trafficData] = coreResults.map(result => result.value);
-  relays = relayData; inbounds = inboundData; users = userData; agents = agentData; traffic = trafficData;
-  renderRelays(); renderInbounds(); renderUsers(); renderAgents(); renderTraffic();
-  const [systemResult, auditResult] = optionalResults;
+  setOperationsSync('loading', '正在同步运营数据…');
+  const results = await Promise.allSettled([api('/api/relays'), api('/api/inbounds'), api('/api/users'), api('/api/agents'), api('/api/traffic'), api('/api/system'), api('/api/system/audit')]);
+  if (results.some(result => result.status === 'rejected' && result.reason?.status === 401)) return;
+  const [relayResult, inboundResult, userResult, agentResult, trafficResult, systemResult, auditResult] = results;
+  if (relayResult.status === 'fulfilled') relays = relayResult.value; else console.error(relayResult.reason);
+  if (inboundResult.status === 'fulfilled') inbounds = inboundResult.value; else console.error(inboundResult.reason);
+  if (userResult.status === 'fulfilled') users = userResult.value; else console.error(userResult.reason);
+  if (agentResult.status === 'fulfilled') agents = agentResult.value; else console.error(agentResult.reason);
+  if (trafficResult.status === 'fulfilled') traffic = trafficResult.value; else console.error(trafficResult.reason);
+  if (relayResult.status === 'fulfilled' || relays.length) renderRelays(); else $('#cards').innerHTML = `<article class="empty-operation"><strong>${zh.apiFailed}</strong><p>中转数据暂时不可用，请稍后刷新。</p></article>`;
+  if (inboundResult.status === 'fulfilled' || inbounds.length) renderInbounds(); else $('#inboundCards').innerHTML = `<article>${zh.apiFailed}</article>`;
+  if (userResult.status === 'fulfilled' || users.length) renderUsers(); else $('#userCards').innerHTML = `<article>${zh.apiFailed}</article>`;
+  if (agentResult.status === 'fulfilled' || agents.length) renderAgents(); else $('#agentCards').innerHTML = `<article class="empty-operation"><strong>${zh.apiFailed}</strong><p>Agent 数据暂时不可用，请稍后刷新。</p></article>`;
+  if (trafficResult.status === 'fulfilled' && traffic) renderTraffic();
   auditAvailable = auditResult.status === 'fulfilled';
   if (systemResult.status === 'fulfilled') { systemInfo = systemResult.value; renderSystem(); }
   else {
     systemInfo = null; console.error(systemResult.reason); $('#securitySummary').textContent = '安全状态暂时不可用。'; $('#securityGrade').textContent = '--'; $('#securityGrade').className = 'security-grade warn'; $('#securityChecks').innerHTML = `<p class="empty-state">${zh.apiFailed}</p>`; $('#tlsSummary').textContent = '证书状态暂时不可用。'; $('#runtimeSummary').textContent = 'Xray 运行状态暂时不可用。';
   }
   if (auditResult.status === 'fulfilled') { auditEntries = auditResult.value.entries || []; renderAudit(); }
-  else { auditEntries = []; console.error(auditResult.reason); $('#auditLog').innerHTML = `<p class="empty-state">审计记录暂时不可用，其他管理功能不受影响。</p>`; }
+  else { auditEntries = []; console.error(auditResult.reason); $('#auditLog').innerHTML = '<p class="empty-state">审计记录暂时不可用，其他管理功能不受影响。</p>'; }
+  const liveFailures = [relayResult, inboundResult, agentResult].filter(result => result.status === 'rejected');
+  if (!liveFailures.length) { lastOperationsSyncAt = new Date(); setOperationsSync('live'); }
+  else setOperationsSync('error', `部分数据同步失败（${liveFailures.length} 项）`);
+}
+function operationsInteractionActive() {
+  const active = document.activeElement; const listFocused = Boolean(active?.closest?.('#cards, #agentCards, #relayBatchBar'));
+  return listFocused || Boolean(document.querySelector('#agentCards details[open]'));
+}
+function autoOperationsRefreshBlocked() { return fleetUpdateInProgress || operationsInteractionActive(); }
+async function refreshOperations(manual = false) {
+  if (applicationLocked) return;
+  if (!manual && autoOperationsRefreshBlocked()) { if (!fleetUpdateInProgress) setOperationsSync('', '正在操作，自动刷新已延后'); return; }
+  if (operationsRefreshPromise) return operationsRefreshPromise;
+  setOperationsSync('loading', '正在刷新实时状态…');
+  operationsRefreshPromise = (async () => {
+    const results = await Promise.allSettled([api('/api/relays'), api('/api/inbounds'), api('/api/agents')]);
+    if (results.some(result => result.status === 'rejected' && result.reason?.status === 401)) return;
+    const [relayResult, inboundResult, agentResult] = results; const failures = results.filter(result => result.status === 'rejected');
+    if (!manual && autoOperationsRefreshBlocked()) { if (!fleetUpdateInProgress) setOperationsSync('', '正在操作，自动刷新已延后'); return; }
+    if (relayResult.status === 'fulfilled') relays = relayResult.value;
+    if (inboundResult.status === 'fulfilled') inbounds = inboundResult.value;
+    if (agentResult.status === 'fulfilled') agents = agentResult.value;
+    renderRelays(); renderInbounds(); renderAgents();
+    if (!failures.length) { lastOperationsSyncAt = new Date(); setOperationsSync('live'); if (manual) toast('实时状态已刷新。', 'success'); }
+    else {
+      setOperationsSync('error', `同步失败（${failures.length} 项）`); failures.forEach(result => console.error(result.reason));
+      if (manual || Date.now() - refreshFailureNotifiedAt > 60000) { toast('部分实时状态同步失败，已保留上次数据。', 'error'); refreshFailureNotifiedAt = Date.now(); }
+    }
+  })();
+  try { return await operationsRefreshPromise; } finally { operationsRefreshPromise = null; }
 }
 async function patchStatus(type, id, status) { await api(`/api/${type}/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }); await load(); }
 async function copyText(value) {
@@ -248,20 +363,126 @@ window.editInbound = id => {
   Object.entries(values).forEach(([name, value]) => { if (form.elements[name]) form.elements[name].value = value; }); $('#inboundAgent').value = inbound.agentId || ''; $('#inboundProtocol').disabled = true;
   $('#inboundModalTitle').textContent = '编辑入站节点'; $('#inboundSubmit').textContent = '保存修改'; openDialog($('#inboundModal'));
 };window.showInboundQr = id => { const inbound = inbounds.find(item => item.id === id); if (!inbound) return; $('#qrTitle').textContent = `${inbound.name} · 节点二维码`; $('#qrImage').src = `/api/inbounds/${id}/qr?t=${Date.now()}`; openDialog($('#qrModal'), '#qrTitle'); };window.copyInbound = async (id, field) => { const inbound = inbounds.find(item => item.id === id); if (!inbound) return; const value = field === 'xray' ? JSON.stringify(inbound.xray || {}, null, 2) : inbound.shareLink; try { await copyText(value || ''); } catch { prompt(field === 'xray' ? zh.copyJson : zh.copyLink, value || ''); } };
-window.toggleAgentCard = id => { if (agentCardCollapsed.has(id)) agentCardCollapsed.delete(id); else agentCardCollapsed.add(id); localStorage.setItem('3xui-agent-collapsed', JSON.stringify([...agentCardCollapsed])); renderAgents(); };window.configureAgentInbound = id => { const agent = agents.find(item => item.id === id); if (!agent) return; editingInboundId = null; const form = $('#inboundForm'); form.reset(); $('#inboundProtocol').disabled = false; $('#inboundModalTitle').textContent = '生成入站节点'; $('#inboundSubmit').textContent = '生成节点'; populateInboundAgents(id); applyInboundTemplate(true); const address = $('#inboundForm').elements.serverAddress; if (address && !address.value) address.value = agent.addresses?.[0] || ''; openDialog($('#inboundModal')); };window.showAgentDetails = id => { const agent = agents.find(item => item.id === id); if (!agent) return; const seconds = Number(agent.uptimeSeconds || 0), uptime = seconds ? `${Math.floor(seconds / 86400)} 天 ${Math.floor(seconds % 86400 / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分` : '-'; const memory = agent.memoryTotal ? `${formatBytes(agent.memoryTotal - Number(agent.memoryFree || 0))} / ${formatBytes(agent.memoryTotal)}` : '-'; const rows = [['机器 ID', agent.id], ['控制地址', agent.controllerUrl], ['控制链路', agent.controllerSecure === false ? '不安全：远程 HTTP，请迁移到 HTTPS' : 'HTTPS / 本机回环 HTTP'], ['Agent 更新', agent.updatePending ? '更新下发中' : agent.updateError || (agent.lastUpdatedAt ? `已更新：${new Date(agent.lastUpdatedAt).toLocaleString('zh-CN')}` : '-')], ['在线状态', agent.status], ['Xray Core', agent.xrayAvailable ? agent.xrayVersion || '可用' : '未检测到'], ['Xray 安装状态', agent.xrayInstallPending || agent.xrayInstalling ? '安装中' : agent.xrayInstallError || (agent.xrayInstalledAt ? `已安装：${new Date(agent.xrayInstalledAt).toLocaleString('zh-CN')}` : '-')], ['主机名', agent.hostname || '-'], ['系统', agent.platform || '-'], ['架构', agent.arch || '-'], ['网卡地址', (agent.addresses || []).join(', ') || '-'], ['CPU 逻辑核', agent.cpus || '-'], ['内存（已用 / 总量）', memory], ['系统运行时长', uptime], ['Agent PID', agent.processId || '-'], ['Agent 启动时间', agent.agentStartedAt ? new Date(agent.agentStartedAt).toLocaleString('zh-CN') : '-'], ['Node.js', agent.nodeVersion || '-'], ['Agent 版本', agent.version || '-'], ['首次登记', agent.createdAt ? new Date(agent.createdAt).toLocaleString('zh-CN') : '-'], ['最后心跳', agent.lastSeenAt ? new Date(agent.lastSeenAt).toLocaleString('zh-CN') : '-']]; const inboundRows = (agent.inboundStates || []).length ? agent.inboundStates.map(item => `<li><b>节点 #${esc(item.id)}</b> · ${esc(item.status)}${item.lastError ? `<small>${esc(item.lastError)}</small>` : ''}</li>`).join('') : '<li>尚未接管节点。</li>'; const relayRows = (agent.relayStates || []).length ? agent.relayStates.map(item => `<li><b>中转 #${esc(item.id)}</b> · ${esc(item.status)} · 连接 ${Number(item.connections || 0)} · ↑${formatBytes(item.bytesIn)} ↓${formatBytes(item.bytesOut)}${item.lastError ? `<small>${esc(item.lastError)}</small>` : ''}</li>`).join('') : '<li>尚未接管中转规则。</li>'; $('#agentDetailsTitle').textContent = `${agent.name} · Agent 详情`; $('#agentDetailsBody').innerHTML = `<div class="agent-detail-grid">${rows.map(([key, value]) => `<div><small>${esc(key)}</small><strong>${esc(value || '-')}</strong></div>`).join('')}</div><h3>已上报节点</h3><ul class="agent-relay-list">${inboundRows}</ul><h3>已上报中转</h3><ul class="agent-relay-list">${relayRows}</ul>`; openDialog($('#agentDetailsModal'), '#agentDetailsTitle'); };window.showAgentBootstrap = async id => { try { const deployment = await api(`/api/agents/${encodeURIComponent(id)}/bootstrap`); showDeployment(deployment, '部署 Agent'); } catch (error) { alert(error.message); } };
-window.editAgentController = async id => {
-  const agent = agents.find(item => item.id === id); if (!agent) return;
-  const controllerUrl = prompt('请输入 Agent 可访问的面板根地址（远程必须使用 HTTPS；同机可使用 http://127.0.0.1:3000）：', agent.controllerUrl || suggestedControllerUrl());
-  if (controllerUrl === null) return;
+function showDiagnostics(reports, title = '线路诊断报告') {
+  const normalized = reports.map(item => ({ name: item.name || '未命名线路', report: item.report || { ok: false, checks: [{ status: 'error', name: '诊断失败', detail: item.error || '未知错误' }] } }));
+  diagnosticsText = normalized.map(item => {
+    const checks = item.report.checks || []; return `${item.name}：${item.report.ok ? '通过' : '需要处理'}\n${checks.map(check => `${check.status === 'ok' ? '✓' : check.status === 'warning' ? '!' : '✗'} ${check.name}：${check.detail}`).join('\n')}`;
+  }).join('\n\n');
+  $('#diagnosticsTitle').textContent = title; $('#diagnosticsBody').innerHTML = normalized.map(item => {
+    const checks = item.report.checks || []; return `<section class="diagnostic-group"><header><strong>${esc(item.name)}</strong><span class="${item.report.ok ? 'ok' : 'error'}">${item.report.ok ? '检查通过' : '需要处理'}</span></header>${checks.map(check => `<div class="diagnostic-check ${esc(check.status)}"><i>${check.status === 'ok' ? '✓' : check.status === 'warning' ? '!' : '×'}</i><strong>${esc(check.name)}</strong><small>${esc(check.detail)}</small></div>`).join('')}</section>`;
+  }).join('') || '<p class="empty-state">没有可显示的诊断结果。</p>';
+  openDialog($('#diagnosticsModal'), '#diagnosticsTitle');
+}
+window.configureAgentInbound = id => {
+  const agent = agents.find(item => item.id === id); if (!agent) return; if (agent.status === 'disabled') return toast('请先启用该 Agent，再创建入站。', 'error'); editingInboundId = null; const form = $('#inboundForm'); form.reset(); $('#inboundProtocol').disabled = false; $('#inboundModalTitle').textContent = `在 ${agent.name} 创建入站`; $('#inboundSubmit').textContent = '生成节点'; populateInboundAgents(id); applyInboundTemplate(true); const address = form.elements.serverAddress; if (address && !address.value) address.value = agent.addresses?.[0] || ''; openDialog($('#inboundModal'));
+};
+window.configureAgentRelay = id => {
+  const agent = agents.find(item => item.id === id); if (!agent) return; if (agent.status === 'disabled') return toast('请先启用该 Agent，再创建中转。', 'error'); editingRelayId = null; const form = $('#form'); form.reset(); form.elements.bindAddress.value = '0.0.0.0'; populateRelayAgents(id); $('#relayModalEyebrow').textContent = 'EDGE RELAY'; $('#relayModalTitle').textContent = `在 ${agent.name} 创建中转`; $('#relaySubmit').textContent = '创建并启用'; openDialog($('#modal'));
+};
+window.showAgentDetails = id => {
+  const agent = agents.find(item => item.id === id); if (!agent) return; const seconds = Number(agent.uptimeSeconds || 0), uptime = seconds ? `${Math.floor(seconds / 86400)} 天 ${Math.floor(seconds % 86400 / 3600)} 小时 ${Math.floor(seconds % 3600 / 60)} 分` : '-'; const memory = agent.memoryTotal ? `${formatBytes(agent.memoryTotal - Number(agent.memoryFree || 0))} / ${formatBytes(agent.memoryTotal)}` : '-';
+  const assignedInbounds = inbounds.filter(item => item.agentId === agent.id), assignedRelays = relays.filter(item => item.agentId === agent.id);
+  const rows = [['机器 ID', agent.id], ['数据新鲜度', formatRelativeTime(agent.lastSeenAt)], ['控制地址', agent.controllerUrl], ['控制链路', agent.controllerSecure === false ? '不安全：请迁移到 HTTPS' : 'HTTPS / 本机回环 HTTP'], ['在线状态', agentStateText(agent)], ['Agent 更新', agent.updatePending ? '更新下发中' : agent.updateError || (agent.lastUpdatedAt ? `已更新：${new Date(agent.lastUpdatedAt).toLocaleString('zh-CN')}` : '-')], ['最近维护撤销', agent.maintenanceCancelledAt ? `${agent.maintenanceCancelledReason || '维护任务已撤销'} · ${new Date(agent.maintenanceCancelledAt).toLocaleString('zh-CN')}` : '-'], ['Xray Core', agent.xrayAvailable ? agent.xrayVersion || '可用' : '未检测到'], ['Xray 安装状态', agent.xrayInstallPending || agent.xrayInstalling ? '安装中' : agent.xrayInstallError || (agent.xrayInstalledAt ? `已安装：${new Date(agent.xrayInstalledAt).toLocaleString('zh-CN')}` : '-')], ['主机名', agent.hostname || '-'], ['系统', agent.platform || '-'], ['架构', agent.arch || '-'], ['网卡地址', (agent.addresses || []).join(', ') || '-'], ['CPU 逻辑核', agent.cpus || '-'], ['内存（已用 / 总量）', memory], ['系统运行时长', uptime], ['Agent PID', agent.processId || '-'], ['Agent 启动时间', agent.agentStartedAt ? new Date(agent.agentStartedAt).toLocaleString('zh-CN') : '-'], ['Node.js', agent.nodeVersion || '-'], ['Agent 版本', agent.version || '-'], ['首次登记', agent.createdAt ? new Date(agent.createdAt).toLocaleString('zh-CN') : '-'], ['最后心跳', agent.lastSeenAt ? new Date(agent.lastSeenAt).toLocaleString('zh-CN') : '-']];
+  const inboundRows = assignedInbounds.length ? assignedInbounds.map(item => `<li><b>${esc(item.name)}</b> · 期望 ${desiredStateText(item.desiredStatus || item.status)} · 实际 ${inboundStateText(item.status)}${item.lastError ? `<small>${esc(item.lastError)}</small>` : ''}</li>`).join('') : '<li>尚未分配入站。</li>';
+  const relayRows = assignedRelays.length ? assignedRelays.map(item => { const state = relayState(item); return `<li><b>${esc(item.name)}</b> · 期望 ${desiredStateText(item.status)} · 实际 ${esc(relayStateText(state, item))} · 连接 ${Number(item.connections || 0)} · ↑${formatBytes(item.bytesIn)} ↓${formatBytes(item.bytesOut)}${item.lastError ? `<small>${esc(item.lastError)}</small>` : ''}</li>`; }).join('') : '<li>尚未分配中转。</li>';
+  $('#agentDetailsTitle').textContent = `${agent.name} · Agent 详情`; $('#agentDetailsBody').innerHTML = `<div class="agent-detail-grid">${rows.map(([key, value]) => `<div><small>${esc(key)}</small><strong title="${esc(value || '-')}">${esc(value || '-')}</strong></div>`).join('')}</div><h3>分配的入站（期望 / 实际）</h3><ul class="agent-relay-list">${inboundRows}</ul><h3>分配的中转（期望 / 实际）</h3><ul class="agent-relay-list">${relayRows}</ul>`; openDialog($('#agentDetailsModal'), '#agentDetailsTitle');
+};
+window.showAgentBootstrap = async id => { try { const deployment = await api(`/api/agents/${encodeURIComponent(id)}/bootstrap`); showDeployment(deployment, '部署 Agent'); } catch (error) { toast(error.message, 'error'); } };
+window.editAgent = id => {
+  const agent = agents.find(item => item.id === id); if (!agent) return; const form = $('#agentEditForm'); form.reset(); form.elements.id.value = agent.id; form.elements.name.value = agent.name; form.elements.controllerUrl.value = agent.controllerUrl || ''; $('#agentEditTitle').textContent = `编辑 ${agent.name}`; openDialog($('#agentEditModal'));
+};
+window.editAgentController = window.editAgent;
+window.toggleAgent = async id => {
+  const agent = agents.find(item => item.id === id); if (!agent) return; const disabling = agent.status !== 'disabled';
+  const maintenance = agentMaintenanceActive(agent);
+  if (disabling && !confirm(maintenance ? `停用 ${agent.name} 将撤销尚未确认的维护任务；已开始的安装可能完成后才停止全部工作负载。确定继续吗？` : `停用 ${agent.name} 后将停止接收配置，并在下次心跳撤销其所有转发。确定继续吗？`)) return;
+  try { const response = await api(`/api/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: !disabling }) }); const cancellation = response?.agent?.maintenanceCancelledReason; toast(disabling ? `${cancellation ? `${cancellation}；` : ''}等待 Agent 心跳确认工作负载已停止。` : 'Agent 已启用，等待下一次心跳。', 'success'); await load(); } catch (error) { toast(error.message, 'error'); }
+};
+window.requestAgentXrayInstall = async id => {
+  const agent = agents.find(item => item.id === id); if (!agent || agentMaintenanceActive(agent) || agent.status !== 'online') return; if (!confirm(`向 ${agent.name} 下发 Xray Core 安装？安装期间节点任务可能短暂不可用。`)) return;
+  try { const response = await api(`/api/agents/${encodeURIComponent(id)}/xray/install`, { method: 'POST', body: '{}' }); toast(response.message || 'Xray 安装任务已下发。', 'success'); await load(); } catch (error) { toast(error.message, 'error'); }
+};
+window.requestAgentUpdate = async id => {
+  const agent = agents.find(item => item.id === id); if (!agent || agentMaintenanceActive(agent) || agent.status !== 'online') return; if (!confirm(`向 ${agent.name} 下发 Agent 更新？更新后 systemd 会重启服务。`)) return;
+  try { const response = await api(`/api/agents/${encodeURIComponent(id)}/update`, { method: 'POST', body: '{}' }); toast(response.message || '更新任务已下发。', 'success'); await load(); } catch (error) { toast(error.message, 'error'); }
+};
+window.rotateAgentToken = async id => {
+  const agent = agents.find(item => item.id === id); if (!agent || !confirm(`轮换 ${agent.name} 的令牌后，旧 Agent 会在下次心跳立即停止服务。必须重新执行部署命令才能恢复，确定继续吗？`)) return;
+  try { const response = await api(`/api/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ rotateToken: true }) }); showDeployment(response.deployment, '令牌已轮换：请立即重新部署'); await load(); } catch (error) { toast(error.message, 'error'); }
+};
+window.deleteAgent = async id => {
+  const agent = agents.find(item => item.id === id); if (!agent || !confirm(`永久删除 ${agent.name}？令牌会立即失效；远端服务需要另行卸载。`)) return;
+  try { await api(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }); toast('Agent 已删除。', 'success'); await load(); } catch (error) { toast(error.message, 'error'); }
+};
+window.toggleRelay = async id => { const item = relays.find(value => value.id === id); if (!item || relayState(item) === 'stopping') return; try { const stopping = item.status === 'running'; const response = await api(`/api/relays/${id}`, { method: 'PATCH', body: JSON.stringify({ status: stopping ? 'stopped' : 'running' }) }); await load(); toast(stopping && response?.pendingRemote ? '停止请求已下发，等待 Agent 确认。' : stopping ? '中转已暂停。' : '中转已启用。', 'success'); } catch (error) { toast(error.message, 'error'); } };
+window.editRelay = id => {
+  const relay = relays.find(item => item.id === id); if (!relay || ['legacy', 'stopping'].includes(relayState(relay))) return; editingRelayId = id; const form = $('#form'); form.reset(); populateRelayAgents(relay.agentId || ''); Object.entries({ name: relay.name, transport: relay.transport, listenPort: relay.listenPort, bindAddress: relay.bindAddress, agentId: relay.agentId || '', targetHost: relay.targetHost, targetPort: relay.targetPort, entry: relay.entry || '', exit: relay.exit || '' }).forEach(([name, value]) => { if (form.elements[name]) form.elements[name].value = value; }); $('#relayModalEyebrow').textContent = 'EDIT RELAY'; $('#relayModalTitle').textContent = `编辑中转：${relay.name}`; $('#relaySubmit').textContent = '验证、保存并重载'; openDialog($('#modal'));
+};
+window.diagnoseRelay = async id => {
+  const relay = relays.find(item => item.id === id); if (!relay) return;
+  try { const report = await api(`/api/relays/${id}/diagnose`, { method: 'POST', body: '{}' }); showDiagnostics([{ name: relay.name, report }]); await refreshOperations(); } catch (error) { showDiagnostics([{ name: relay.name, error: error.message }]); }
+};
+window.deleteRelay = async id => {
+  const relay = relays.find(item => item.id === id); if (!relay || relayState(relay) === 'stopping' || !confirm(`删除中转“${relay.name}”？${relay.agentId ? '请求将在 Agent 心跳后执行；确认前规则仍保留且可能继续转发。' : '本机现有连接会立即断开。'}`)) return;
+  try { const response = await api(`/api/relays/${id}`, { method: 'DELETE' }); if (!response?.pending) selectedRelayIds.delete(Number(id)); toast(response?.pending ? '删除请求已下发，等待 Agent 确认后移除规则。' : '中转规则已删除。', 'success'); await load(); } catch (error) { toast(error.message, 'error'); }
+};
+async function runRelayBatchStatus(status) {
+  const ids = [...selectedRelayIds]; if (!ids.length) return; const action = status === 'running' ? '启用' : '暂停', selected = ids.map(id => relays.find(item => item.id === id)).filter(Boolean), remoteCount = selected.filter(item => item.agentId).length; const impact = status === 'stopped' ? (remoteCount ? `本机规则会立即断开；${remoteCount} 条远程规则需等待 Agent 心跳确认。` : '本机现有连接会立即断开。') : (remoteCount ? `${remoteCount} 条远程规则需等待 Agent 应用后才算运行。` : '本机规则将在监听成功后显示运行。'); if (!confirm(`批量${action}已选择的 ${ids.length} 条中转？${impact}`)) return;
+  const reports = []; for (const id of ids) { const relay = relays.find(item => item.id === id); if (!relay) continue; try { const result = await api(`/api/relays/${id}`, { method: 'PATCH', body: JSON.stringify({ status }) }); const actual = relayState(result || {}), failed = status === 'running' && actual === 'error', waiting = !failed && (status === 'stopped' ? Boolean(result?.pendingRemote) || actual === 'stopping' : actual !== 'running'); const detail = failed ? (result?.lastError || '启用失败，规则未运行') : waiting ? (status === 'stopped' ? '停止请求已下发，等待 Agent 确认' : `启用请求已接受，当前${relayStateText(actual, result)}`) : status === 'stopped' ? '已暂停' : '已启用并运行'; reports.push({ name: relay.name, report: { ok: !failed && !waiting, checks: [{ status: failed ? 'error' : waiting ? 'warning' : 'ok', name: '批量操作', detail }] } }); } catch (error) { reports.push({ name: relay.name, error: error.message }); } }
+  selectedRelayIds.clear(); await load(); showDiagnostics(reports, `批量${action}结果`);
+}
+async function diagnoseSelectedRelays() {
+  const ids = [...selectedRelayIds]; if (!ids.length) return; const reports = [];
+  for (const id of ids) { const relay = relays.find(item => item.id === id); if (!relay) continue; try { reports.push({ name: relay.name, report: await api(`/api/relays/${id}/diagnose`, { method: 'POST', body: '{}' }) }); } catch (error) { reports.push({ name: relay.name, error: error.message }); } }
+  showDiagnostics(reports, `批量诊断 · ${reports.length} 条线路`); await refreshOperations();
+}
+function fleetUpdateDelay(milliseconds) { return new Promise(resolve => setTimeout(resolve, milliseconds)); }
+async function fetchAgentFleetSnapshot() {
+  const snapshot = await api('/api/agents'); agents = snapshot; return snapshot;
+}
+async function waitForAgentUpdate(target, before) {
+  const deadline = Date.now() + 180000; let sawPending = false;
+  while (Date.now() < deadline) {
+    await fleetUpdateDelay(2500);
+    const snapshot = await fetchAgentFleetSnapshot(); const current = snapshot.find(agent => agent.id === target.id);
+    if (!current) throw new Error('Agent 已被删除或不可见');
+    if (current.status === 'disabled') throw new Error('Agent 在更新期间被停用');
+    sawPending = sawPending || current.updatePending;
+    if (current.updateError && !current.updatePending) throw new Error(current.updateError);
+    const versionChanged = String(current.version || '') !== String(before.version || '');
+    const completedAtChanged = Boolean(current.lastUpdatedAt && current.lastUpdatedAt !== before.lastUpdatedAt);
+    if (!current.updatePending && (sawPending || versionChanged || completedAtChanged)) return current;
+  }
+  throw new Error('等待 Agent 更新确认超时（180 秒）');
+}
+async function updateOnlineAgentFleet() {
+  if (fleetUpdateInProgress) return;
+  const targets = agents.filter(agent => agent.status === 'online' && !agentMaintenanceActive(agent));
+  if (!targets.length) return;
+  if (!confirm(`将按金丝雀顺序更新 ${targets.length} 台在线 Agent：每台确认完成后才更新下一台；遇到失败会立即停止。继续吗？`)) return;
+  const button = $('#updateOnlineAgents'); let completed = 0, failed = null, currentTarget = null;
+  fleetUpdateInProgress = true; button.disabled = true;
   try {
-    const response = await api(`/api/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ controllerUrl }) });
-    showDeployment(response.deployment, '地址已更新：重新部署 Agent');
-    await load();
-  } catch (error) { alert(error.message); }
-};window.toggleAgent = async id => { const agent = agents.find(item => item.id === id); if (!agent) return; try { await api(`/api/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: agent.status === 'disabled' }) }); await load(); } catch (error) { alert(error.message); } };
-window.requestAgentXrayInstall = async id => { const agent = agents.find(item => item.id === id); if (!agent || agent.xrayInstallPending) return; if (!confirm(`向 ${agent.name} 下发 Xray Core 自动安装？将下载官方 release、校验 SHA-256 并安装到该 Agent 私有目录。`)) return; try { const response = await api(`/api/agents/${encodeURIComponent(id)}/xray/install`, { method: 'POST', body: '{}' }); alert(response.message || 'Xray 安装任务已下发。'); await load(); } catch (error) { alert(error.message); } };window.requestAgentUpdate = async id => { const agent = agents.find(item => item.id === id); if (!agent || agent.updatePending) return; if (!confirm(`向 ${agent.name} 下发一键更新？Agent 会下载当前脚本并由 systemd 重启。`)) return; try { const response = await api(`/api/agents/${encodeURIComponent(id)}/update`, { method: 'POST', body: '{}' }); alert(response.message || '更新请求已下发。'); await load(); } catch (error) { alert(error.message); } };window.rotateAgentToken = async id => { if (!confirm('轮换令牌会使当前 Agent 在下一次心跳停止所有中转。需要重新部署后才能恢复，确定继续吗？')) return; try { const response = await api(`/api/agents/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ rotateToken: true }) }); showDeployment(response.deployment, '令牌已轮换：重新部署 Agent'); await load(); } catch (error) { alert(error.message); } };window.deleteAgent = async id => { if (!confirm('删除该 Agent 后，它的令牌将立即失效。确定继续吗？')) return; try { await api(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }); await load(); } catch (error) { alert(error.message); } };window.toggleRelay = async id => { const item = relays.find(value => value.id === id); if (!item) return; try { await patchStatus('relays', id, item.status === 'running' ? 'stopped' : 'running'); } catch (error) { alert(error.message); } };
-window.editRelay = id => { const relay = relays.find(item => item.id === id); if (!relay || relayState(relay) === 'legacy') return; editingRelayId = id; const form = $('#form'); form.reset(); populateRelayAgents(); Object.entries({ name: relay.name, transport: relay.transport, listenPort: relay.listenPort, bindAddress: relay.bindAddress, agentId: relay.agentId || '', targetHost: relay.targetHost, targetPort: relay.targetPort, entry: relay.entry || '', exit: relay.exit || '' }).forEach(([name, value]) => { if (form.elements[name]) form.elements[name].value = value; }); $('#relayModalEyebrow').textContent = 'EDIT RELAY'; $('#relayModalTitle').textContent = `编辑中转：${relay.name}`; $('#relaySubmit').textContent = '保存并重载'; openDialog($('#modal')); };
-window.diagnoseRelay = async id => { try { const report = await api(`/api/relays/${id}/diagnose`, { method: 'POST', body: '{}' }); const icon = state => state === 'ok' ? '✓' : state === 'warning' ? '!' : '✗'; alert(`${report.ok ? '中转诊断完成' : '中转需要处理'}\n\n${report.checks.map(check => `${icon(check.status)} ${check.name}：${check.detail}`).join('\n')}`); await load(); } catch (error) { alert(error.message); } };window.deleteRelay = async id => { if (confirm(zh.confirmRelay)) try { await api(`/api/relays/${id}`, { method: 'DELETE' }); await load(); } catch (error) { alert(error.message); } };
+    for (const target of targets) {
+      currentTarget = target; button.textContent = `更新 ${completed + 1}/${targets.length}：${target.name}`; setOperationsSync('loading', `金丝雀更新 ${completed + 1}/${targets.length} · ${target.name}`);
+      const snapshot = await fetchAgentFleetSnapshot(); const before = snapshot.find(agent => agent.id === target.id);
+      if (!before) throw new Error('Agent 已被删除或不可见');
+      if (before.status !== 'online') throw new Error('Agent 在排队期间离线');
+      if (agentMaintenanceActive(before)) throw new Error('Agent 已有维护任务，已停止后续更新');
+      await api(`/api/agents/${encodeURIComponent(target.id)}/update`, { method: 'POST', body: '{}' });
+      await waitForAgentUpdate(target, before); completed++;
+    }
+  } catch (error) {
+    failed = { name: currentTarget?.name || 'Agent', message: error.message };
+  } finally {
+    fleetUpdateInProgress = false;
+    try { await load(); } catch (error) { if (!failed) failed = { name: currentTarget?.name || '面板', message: error.message }; }
+    const remaining = agents.filter(agent => agent.status === 'online' && !agentMaintenanceActive(agent)); button.disabled = remaining.length === 0; button.textContent = remaining.length ? `更新在线 Agent（${remaining.length}）` : '更新在线 Agent';
+  }
+  if (applicationLocked) return;
+  if (failed) { setOperationsSync('error', `更新停止 · ${failed.name}`); toast(`已完成 ${completed}/${targets.length} 台；${failed.name} 失败：${failed.message}`, 'error'); }
+  else toast(`已按顺序完成 ${completed} 台 Agent 更新。`, 'success');
+}
 window.diagnoseInbound = async id => { const item = inbounds.find(value => value.id === id); if (!item) return; try { const report = await api(`/api/inbounds/${id}/diagnose`, { method: 'POST', body: JSON.stringify({ repair: true }) }); const icon = state => state === 'ok' ? '✓' : state === 'warning' ? '!' : '✗'; alert(`${report.ok ? '诊断完成' : '发现需要处理的问题'}\n\n${report.checks.map(check => `${icon(check.status)} ${check.name}：${check.detail}`).join('\n')}`); await load(); } catch (error) { alert(error.message); } };window.toggleInbound = async id => { const item = inbounds.find(value => value.id === id); if (!item) return; try { await patchStatus('inbounds', id, inboundDesiredState(item) === 'running' ? 'stopped' : 'running'); } catch (error) { alert(error.message); } };
 window.deleteInbound = async id => { if (confirm(zh.confirmInbound)) try { await api(`/api/inbounds/${id}`, { method: 'DELETE' }); await load(); } catch (error) { alert(error.message); } };
 window.copyUserLink = async id => { const user = users.find(item => item.id === id); const link = user?.access?.[0]?.link; if (!link) return; try { await copyText(link); } catch { prompt('节点链接', link); } };
@@ -275,10 +496,22 @@ function activatePage(id, moveFocus = true) {
   document.querySelectorAll('.page').forEach(page => page.classList.toggle('active', page.id === id));
   document.querySelectorAll('.nav').forEach(nav => { const active = nav.dataset.page === id; nav.classList.toggle('active', active); if (active) nav.setAttribute('aria-current', 'page'); else nav.removeAttribute('aria-current'); });
   $('#crumb').innerHTML = `控制台 / <strong>${pageNames[id]}</strong>`; history.replaceState(null, '', `#${id}`); closeSidebar(); if (moveFocus) focusActivePage();
+  if (['relays', 'agents'].includes(id) && !applicationLocked && (!lastOperationsSyncAt || Date.now() - lastOperationsSyncAt.getTime() > 5000)) refreshOperations();
 }
 
 document.querySelectorAll('.nav,[data-go]').forEach(link => link.onclick = event => { const id = link.dataset.page || link.dataset.go; if (!id) return; event.preventDefault(); activatePage(id); });
 $('#search').oninput = renderRelays;
+$('#relayExecutorFilter').onchange = renderRelays;
+$('#agentSearch').oninput = renderAgents;
+$('#agentStatusFilter').onchange = event => { agentFilter = event.target.value; renderAgents(); };
+$('#relayRefresh').onclick = () => refreshOperations(true);
+$('#agentRefresh').onclick = () => refreshOperations(true);
+$('#relayBatchEnable').onclick = () => runRelayBatchStatus('running');
+$('#relayBatchPause').onclick = () => runRelayBatchStatus('stopped');
+$('#relayBatchDiagnose').onclick = diagnoseSelectedRelays;
+$('#relayBatchClear').onclick = () => { selectedRelayIds.clear(); renderRelays(); };
+$('#updateOnlineAgents').onclick = updateOnlineAgentFleet;
+$('#copyDiagnostics').onclick = async () => { try { await copyText(diagnosticsText); } catch { prompt('诊断报告', diagnosticsText); } };
 document.querySelectorAll('.filter').forEach(button => button.onclick = () => { filter = button.dataset.filter; document.querySelectorAll('.filter').forEach(item => { const active = item === button; item.classList.toggle('active', active); item.setAttribute('aria-pressed', String(active)); }); renderRelays(); });
 $('#newRelay').onclick = () => { editingRelayId = null; const form = $('#form'); form.reset(); form.elements.bindAddress.value = '0.0.0.0'; populateRelayAgents(); $('#relayModalEyebrow').textContent = 'NEW RELAY'; $('#relayModalTitle').textContent = '创建端口转发'; $('#relaySubmit').textContent = '创建并启用'; openDialog($('#modal')); };
 $('#newAgent').onclick = () => { const form = $('#agentForm'); form.reset(); form.elements.controllerUrl.value = suggestedControllerUrl(); openDialog($('#agentModal')); };$('#import3xuiInbound').onclick = () => { const form = $('#import3xuiForm'); form.reset(); populateInboundAgents(); const select = $('#importInboundAgent'); select.innerHTML = $('#inboundAgent').innerHTML; const address = form.elements.serverAddress; if (!address.value && systemInfo?.network?.publicAddress) address.value = systemInfo.network.publicAddress; openDialog($('#import3xuiModal')); };$('#newInbound').onclick = () => { editingInboundId = null; const form = $('#inboundForm'); form.reset(); $('#inboundProtocol').disabled = false; $('#inboundModalTitle').textContent = '生成入站节点'; $('#inboundSubmit').textContent = '生成节点'; populateInboundAgents(); applyInboundTemplate(true); const address = form.elements.serverAddress; if (address && !address.value && systemInfo?.network?.publicAddress) address.value = systemInfo.network.publicAddress; openDialog($('#inboundModal')); };
@@ -304,11 +537,33 @@ async function submitOnce(event, action, onError = error => alert(error.message)
   setFormBusy(form, true);
   try { await action(form); } catch (error) { onError(error); } finally { setFormBusy(form, false); }
 }
-$('#form').onsubmit = event => submitOnce(event, async form => { const target = editingRelayId ? `/api/relays/${editingRelayId}` : '/api/relays'; await api(target, { method: editingRelayId ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); editingRelayId = null; form.reset(); $('#modal').close(); await load(); });
+function confirmAgentBindingChange(select) {
+  if (!select || select.dataset.initialAgentDisabled !== 'true') return true;
+  const initialId = select.dataset.initialAgentId || ''; const nextId = select.value || '';
+  if (nextId === initialId) return true;
+  const currentName = agents.find(agent => agent.id === initialId)?.name || initialId || '未知 Agent'; const nextName = agents.find(agent => agent.id === nextId)?.name || (nextId ? nextId : '本机面板');
+  return confirm(`当前资源绑定在已停用的 ${currentName}。确定将执行节点迁移到 ${nextName} 吗？`);
+}
+function assertEditableAgentBinding(select) {
+  if (select?.dataset.initialAgentDisabled === 'true' && select.value === select.dataset.initialAgentId) throw new Error('当前执行 Agent 已停用；请先启用该 Agent，或明确选择新的执行节点后再保存。');
+}
+$('#form').onsubmit = event => {
+  if (editingRelayId && !confirmAgentBindingChange($('#relayAgent'))) { event.preventDefault(); return; }
+  return submitOnce(event, async form => { assertEditableAgentBinding($('#relayAgent')); const target = editingRelayId ? `/api/relays/${editingRelayId}` : '/api/relays'; await api(target, { method: editingRelayId ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); editingRelayId = null; form.reset(); $('#modal').close(); await load(); });
+};
 $('#agentForm').onsubmit = event => submitOnce(event, async form => { const response = await api('/api/agents', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); form.reset(); $('#agentModal').close(); showDeployment(response.deployment, `部署 ${response.agent.name}`); await load(); });
+$('#agentEditForm').onsubmit = event => submitOnce(event, async form => {
+  const data = Object.fromEntries(new FormData(form)); const agent = agents.find(item => item.id === data.id); if (!agent) throw new Error('Agent 不存在或已刷新');
+  const changedController = data.controllerUrl.trim().replace(/\/$/, '') !== String(agent.controllerUrl || '').replace(/\/$/, ''); const payload = { name: data.name }; if (changedController) payload.controllerUrl = data.controllerUrl;
+  const response = await api(`/api/agents/${encodeURIComponent(agent.id)}`, { method: 'PATCH', body: JSON.stringify(payload) }); form.reset(); $('#agentEditModal').close();
+  if (response.deployment) showDeployment(response.deployment, '控制地址已更新：请重新部署'); else toast('Agent 信息已保存。', 'success'); await load();
+});
 $('#copyAgentCommand').onclick = async () => { try { await copyText($('#agentCommand').textContent); } catch { prompt('启动命令', $('#agentCommand').textContent); } };
 $('#import3xuiForm').onsubmit = event => submitOnce(event, async form => { await api('/api/inbounds/import-3xui', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); form.reset(); $('#import3xuiModal').close(); await load(); });
-$('#inboundForm').onsubmit = event => submitOnce(event, async form => { const target = editingInboundId ? '/api/inbounds/' + editingInboundId : '/api/inbounds'; await api(target, { method: editingInboundId ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); editingInboundId = null; form.reset(); $('#inboundProtocol').disabled = false; $('#inboundModal').close(); await load(); });
+$('#inboundForm').onsubmit = event => {
+  if (editingInboundId && !confirmAgentBindingChange($('#inboundAgent'))) { event.preventDefault(); return; }
+  return submitOnce(event, async form => { assertEditableAgentBinding($('#inboundAgent')); const target = editingInboundId ? '/api/inbounds/' + editingInboundId : '/api/inbounds'; await api(target, { method: editingInboundId ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); editingInboundId = null; form.reset(); $('#inboundProtocol').disabled = false; $('#inboundModal').close(); await load(); });
+};
 $('#userForm').onsubmit = event => submitOnce(event, async form => { const target = editingUserId ? `/api/users/${editingUserId}` : '/api/users'; await api(target, { method: editingUserId ? 'PATCH' : 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); editingUserId = null; form.reset(); form.elements.name.disabled = false; form.elements.email.disabled = false; form.elements.inboundId.disabled = false; $('#userModal').close(); await load(); });
 $('#trafficForm').onsubmit = event => submitOnce(event, async form => { const response = await api('/api/traffic/record', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(form))) }); form.reset(); $('#trafficModal').close(); await load(); if (response.reachedLimit) alert('该用户已达到流量配额，系统已自动暂停其访问。'); });
 $('#passwordForm').onsubmit = event => submitOnce(event, async form => { const data = Object.fromEntries(new FormData(form)); if (data.newPassword !== data.confirmPassword) return toast('两次新密码不一致', 'error'); await api('/api/system/password', { method: 'POST', body: JSON.stringify(data) }); form.reset(); const modal = $('#passwordModal'); delete modal.dataset.required; modal.close(); showLogin('密码已更新，请使用新密码重新登录。'); });
@@ -331,6 +586,8 @@ $('#trafficModal').addEventListener('close', () => $('#trafficForm').reset());
 $('#qrModal').addEventListener('close', () => { $('#qrImage').removeAttribute('src'); $('#qrTitle').textContent = '节点二维码'; });
 $('#agentBootstrapModal').addEventListener('close', () => { $('#agentCommand').textContent = ''; $('#agentBootstrapTitle').textContent = '部署 Agent'; });
 $('#agentDetailsModal').addEventListener('close', () => { $('#agentDetailsBody').replaceChildren(); $('#agentDetailsTitle').textContent = 'Agent 详情'; });
+$('#agentEditModal').addEventListener('close', () => { $('#agentEditForm').reset(); $('#agentEditTitle').textContent = '编辑 Agent'; });
+$('#diagnosticsModal').addEventListener('close', () => { $('#diagnosticsBody').replaceChildren(); $('#diagnosticsTitle').textContent = '线路诊断报告'; diagnosticsText = ''; });
 $('#loginForm').onsubmit = event => submitOnce(event, async form => { const data = Object.fromEntries(new FormData(form)); const response = await api('/api/auth/login', { method: 'POST', body: JSON.stringify(data) }); if (response.transportWarning) toast(response.transportWarning, 'error'); hideLogin(); form.reset(); if (response.mustChangePassword) return forcePasswordChange(); await load(); focusActivePage(); }, error => { $('#loginNote').textContent = error.message; });
 $('#logout').onclick = async () => { const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 8000); try { await api('/api/auth/logout', { method: 'POST', signal: controller.signal }); clearAuthenticatedState(); showLogin('已安全退出。'); } catch (error) { if (error.status !== 401) toast(`退出失败：${error.name === 'AbortError' ? '请求超时' : error.message}。当前会话未确认失效。`, 'error'); } finally { clearTimeout(timeout); } };
 function setTheme(dark) {
@@ -343,5 +600,11 @@ $('#theme').onclick = () => setTheme(!document.body.classList.contains('dark'));
 $('#menu').onclick = () => { const open = !$('.sidebar').classList.contains('open'); $('.sidebar').classList.toggle('open', open); document.body.classList.toggle('nav-open', open); $('#menu').setAttribute('aria-expanded', String(open)); $('#menu').setAttribute('aria-label', open ? '关闭菜单' : '打开菜单'); syncApplicationAccess(); };
 $('#sidebarScrim').onclick = closeSidebar; mobileNavigation.addEventListener?.('change', closeSidebar);
 document.addEventListener('keydown', event => { if (event.key === 'Escape' && $('.sidebar').classList.contains('open')) { closeSidebar(); $('#menu').focus(); } });
+function operationsPageVisible() { return ['overview', 'relays', 'agents'].includes($('.page.active')?.id); }
+function canAutoRefreshOperations() { return !document.hidden && !applicationLocked && operationsPageVisible() && !document.querySelector('dialog[open]') && !autoOperationsRefreshBlocked(); }
+setInterval(() => {
+  if (canAutoRefreshOperations()) refreshOperations();
+}, 15000);
+document.addEventListener('visibilitychange', () => { if (canAutoRefreshOperations()) refreshOperations(); });
 const initialPage = location.hash.slice(1); if (pageNames[initialPage]) activatePage(initialPage, false);
 (async () => { try { const session = await api('/api/auth/me'); if (session.authenticated) { hideLogin(); if (session.mustChangePassword) forcePasswordChange(); else { await load(); focusActivePage(); } } else showLogin(); } catch { showLogin('无法连接面板服务，请确认已运行 node server.js。'); } })();
